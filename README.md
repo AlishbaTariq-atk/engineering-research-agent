@@ -3,7 +3,7 @@
 An AI research platform that ingests technical content from multiple public
 sources (arXiv, GitHub, RSS/engineering blogs, and government/standards
 publications) into a structured, versioned knowledge base, and answers
-research questions through an agentic retrieval workflow — producing
+research questions through an agentic retrieval workflow, producing
 evidence-backed briefs with citations, confidence assessment, and identified
 knowledge gaps.
 
