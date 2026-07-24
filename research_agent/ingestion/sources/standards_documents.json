@@ -1,0 +1,23 @@
+[
+  {
+    "source_id": "nist-ai-rmf-1.0",
+    "url": "https://nvlpubs.nist.gov/nistpubs/ai/NIST.AI.100-1.pdf",
+    "title": "NIST AI Risk Management Framework (AI RMF 1.0)",
+    "published": "2023-01-26",
+    "tags": ["nist", "risk-management", "framework"]
+  },
+  {
+    "source_id": "eo-14110-safe-secure-trustworthy-ai",
+    "url": "https://www.govinfo.gov/content/pkg/FR-2023-11-01/pdf/2023-24283.pdf",
+    "title": "Executive Order 14110: Safe, Secure, and Trustworthy Development and Use of Artificial Intelligence",
+    "published": "2023-11-01",
+    "tags": ["executive-order", "policy", "united-states"]
+  },
+  {
+    "source_id": "eu-ai-act-2024-1689",
+    "url": "https://eur-lex.europa.eu/legal-content/EN/TXT/PDF/?uri=CELEX:32024R1689",
+    "title": "Regulation (EU) 2024/1689 (EU Artificial Intelligence Act)",
+    "published": "2024-07-12",
+    "tags": ["eu-ai-act", "regulation", "european-union"]
+  }
+]

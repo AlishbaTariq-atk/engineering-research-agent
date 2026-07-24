@@ -52,9 +52,10 @@ def _parse_date(value: str | None) -> date | None:
 
 def fetch(
     settings: Settings,
-    categories: tuple[str, ...] = ("cs.CL", "cs.AI", "cs.LG"),
+    categories: tuple[str, ...] | None = None,
     max_results: int = 1000,
     full_text_limit: int = 300,
+    start_offset: int = 0,
 ) -> Iterator[Document]:
     """Yields one Document per matching arXiv paper.
 
@@ -65,13 +66,16 @@ def fetch(
     strategy decision. Parsing 50k PDFs would dominate the ingestion time
     budget for marginal retrieval benefit over the abstract alone.
 
-    `settings` isn't used by this adapter (arXiv's API is fully public) but
-    is part of every adapter's signature so the pipeline/scheduler can call
-    any source generically - GitHub's adapter needs it for an API token.
+    `start_offset` is what makes historical backfill an actual capability
+    rather than just "re-run and refetch the same recent window": a
+    scheduled run leaves this at 0 (always the newest papers), while a
+    manual backfill call passes start_offset=5000 to page deeper into
+    arXiv's history - no code change, just a different call argument.
     """
+    categories = categories if categories is not None else settings.arxiv_category_list
     query = " OR ".join(f"cat:{c}" for c in categories)
     fetched = 0
-    start = 0
+    start = start_offset
 
     with httpx.Client(timeout=30.0) as client:
         while fetched < max_results:
