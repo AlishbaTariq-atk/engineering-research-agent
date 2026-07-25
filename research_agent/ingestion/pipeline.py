@@ -4,6 +4,7 @@ import json
 import sqlite3
 import uuid
 from collections.abc import Iterator
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from pydantic import BaseModel
@@ -12,6 +13,21 @@ from research_agent.models import Document, SourceName
 from research_agent.storage import get_connection
 
 from .deduplicator import find_cross_source_duplicate
+
+
+@dataclass
+class FetchFailure:
+    """Yielded by an adapter instead of a Document when a specific item
+    (one repo, one feed, one curated URL) fails to fetch. Adapters could
+    just log a warning and skip - but that failure would then be invisible
+    to anything reading ingestion_runs/ingestion_failures, undercounting
+    exactly the "failure reporting" the assessment asks for. Adapters stay
+    DB-free (only pipeline.py touches SQLite) by yielding this instead of
+    writing to the failures table themselves."""
+
+    source_id: str
+    url: str
+    error_message: str
 
 
 class IngestionResult(BaseModel):
@@ -93,21 +109,21 @@ def _touch_last_checked(conn: sqlite3.Connection, doc_id: str) -> None:
 
 def run_ingestion(
     source_name: SourceName,
-    documents: Iterator[Document],
+    documents: Iterator[Document | FetchFailure],
     db_path: str,
     trigger: str = "manual",
 ) -> IngestionResult:
     """Generic upsert + logging loop shared by every adapter. Each adapter
     is responsible only for producing valid Document objects (fetch, parse,
-    map fields); idempotency, versioning, duplicate detection, and run
-    logging all live here exactly once, so every source gets them for free
-    and can't drift from each other.
+    map fields) or a FetchFailure for an item it couldn't fetch; idempotency,
+    versioning, duplicate detection, and run logging all live here exactly
+    once, so every source gets them for free and can't drift from each other.
 
-    Commits per-document (not once at the end): if the `documents`
-    generator itself raises partway through (e.g. a network drop on page 6
-    of an arXiv query), everything already processed in this run stays
-    committed and the run is logged as 'failed' with a summary - a
-    transient failure loses nothing already ingested.
+    Commits per-item (not once at the end): if the `documents` generator
+    itself raises partway through (e.g. a network drop on page 6 of an
+    arXiv query), everything already processed in this run stays committed
+    and the run is logged as 'failed' with a summary - a transient failure
+    loses nothing already ingested.
     """
     run_id = str(uuid.uuid4())
     conn = get_connection(db_path)
@@ -120,8 +136,20 @@ def run_ingestion(
     conn.commit()
 
     try:
-        for doc in documents:
+        for item in documents:
             result.fetched += 1
+
+            if isinstance(item, FetchFailure):
+                result.failed += 1
+                conn.execute(
+                    "INSERT INTO ingestion_failures (run_id, source_id, url, error_message, occurred_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (run_id, item.source_id, item.url, item.error_message, datetime.now(UTC).isoformat()),
+                )
+                conn.commit()
+                continue
+
+            doc = item
             try:
                 existing = _document_exists(conn, doc.doc_id)
                 if existing is None:

@@ -12,6 +12,7 @@ from research_agent.models import Document, SourceCategory, SourceName, StorageM
 
 from .deduplicator import compute_content_hash, make_doc_id
 from .parser import clean_html
+from .pipeline import FetchFailure
 
 SOURCE = SourceName.RSS_BLOG
 
@@ -39,11 +40,12 @@ def _entry_text(entry) -> tuple[str, str | None]:
     return summary, None
 
 
-def fetch(settings: Settings, feed_urls: list[str] | None = None) -> Iterator[Document]:
+def fetch(settings: Settings, feed_urls: list[str] | None = None) -> Iterator[Document | FetchFailure]:
     """One Document per feed entry.
 
-    Each feed is parsed independently - a dead/unreachable feed URL is
-    logged and skipped, not fatal to the others.
+    Each feed is parsed independently - a dead/unreachable feed URL yields
+    a FetchFailure (so it lands in ingestion_failures, not just a console
+    log line) and moves on rather than being fatal to the others.
 
     Real limitation, documented rather than worked around: RSS backfill is
     bounded by whatever the publisher's feed currently exposes (typically
@@ -67,6 +69,7 @@ def fetch(settings: Settings, feed_urls: list[str] | None = None) -> Iterator[Do
                 raise parsed.bozo_exception or ValueError("unparseable feed")
         except Exception as exc:
             logger.warning("rss adapter: failed to fetch/parse %s (%s)", feed_url, exc)
+            yield FetchFailure(source_id=feed_url, url=feed_url, error_message=str(exc))
             continue
 
         feed_title = parsed.feed.get("title", feed_url)

@@ -23,6 +23,11 @@ CREATE TABLE IF NOT EXISTS documents (
     superseded_by     TEXT REFERENCES documents(doc_id),
     source_metadata   TEXT NOT NULL DEFAULT '{}',    -- JSON object
 
+    -- NULL until first indexed. Compared against `version` to decide
+    -- whether this document's chunks in Chroma are stale and need
+    -- re-embedding - the SQLite-side counterpart to Chunk.parent_version.
+    last_indexed_version  INTEGER,
+
     -- doc_id is already derived from (source, source_id); this unique
     -- constraint makes that natural key explicit to a reader and guards
     -- against it independently of a hash bug/collision in doc_id itself.

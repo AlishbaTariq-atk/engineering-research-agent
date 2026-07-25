@@ -11,6 +11,7 @@ from research_agent.config import Settings
 from research_agent.models import Document, SourceCategory, SourceName, StorageMode
 
 from .deduplicator import compute_content_hash, make_doc_id
+from .pipeline import FetchFailure
 
 SOURCE = SourceName.GITHUB
 GITHUB_API = "https://api.github.com"
@@ -111,7 +112,7 @@ def fetch(
     settings: Settings,
     repos: list[str] | None = None,
     max_pages_per_repo: int = 3,
-) -> Iterator[Document]:
+) -> Iterator[Document | FetchFailure]:
     """One Document per release, plus one for the current README, per repo.
 
     Release notes and READMEs are already plain text from the API - no PDF
@@ -120,8 +121,10 @@ def fetch(
     arXiv's mostly-abstract-only strategy.
 
     Each repo is fetched independently: a failure on one (rate limit, 404,
-    network error) is logged and skipped rather than aborting the whole
-    run, so one broken repo doesn't cost you every other repo in the list.
+    network error) yields a FetchFailure and moves on rather than aborting
+    the whole run, so one broken repo doesn't cost you every other repo in
+    the list - and the failure still ends up in ingestion_failures instead
+    of only a console log line.
     """
     target_repos = repos if repos is not None else settings.github_repo_list
 
@@ -134,4 +137,5 @@ def fetch(
                     yield readme
             except httpx.HTTPError as exc:
                 logger.warning("github adapter: failed to fetch %s (%s)", repo, exc)
+                yield FetchFailure(source_id=repo, url=f"{GITHUB_API}/repos/{repo}", error_message=str(exc))
                 continue

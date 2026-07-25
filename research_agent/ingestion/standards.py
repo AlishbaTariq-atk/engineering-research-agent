@@ -13,6 +13,7 @@ from research_agent.models import Document, SourceCategory, SourceName, StorageM
 
 from .deduplicator import compute_content_hash, make_doc_id
 from .parser import extract_pdf_text
+from .pipeline import FetchFailure
 
 SOURCE = SourceName.GOV_STANDARDS
 
@@ -25,7 +26,7 @@ def _load_curated_documents() -> list[dict]:
     return json.loads(CURATED_DOCUMENTS_PATH.read_text())
 
 
-def fetch(settings: Settings, documents: list[dict] | None = None) -> Iterator[Document]:
+def fetch(settings: Settings, documents: list[dict] | None = None) -> Iterator[Document | FetchFailure]:
     """Government/standards bodies don't expose a paginated discovery API
     the way arXiv or GitHub do - there's no query endpoint that returns
     "all AI regulations." So this source is modeled differently on
@@ -39,7 +40,8 @@ def fetch(settings: Settings, documents: list[dict] | None = None) -> Iterator[D
     source works like the others.
 
     Each document is fetched independently; a dead link or transient
-    network error is logged and skipped rather than aborting the run.
+    network error yields a FetchFailure (so it lands in ingestion_failures,
+    not just a console log line) rather than aborting the run.
     """
     entries = documents if documents is not None else _load_curated_documents()
 
@@ -53,6 +55,7 @@ def fetch(settings: Settings, documents: list[dict] | None = None) -> Iterator[D
                     raise ValueError("no extractable text in PDF")
             except Exception as exc:
                 logger.warning("standards adapter: failed to fetch %s (%s)", entry["url"], exc)
+                yield FetchFailure(source_id=entry["source_id"], url=entry["url"], error_message=str(exc))
                 continue
 
             published: date | None = None

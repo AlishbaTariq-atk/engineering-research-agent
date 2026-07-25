@@ -3,9 +3,11 @@ from __future__ import annotations
 import argparse
 import logging
 import time
+from pathlib import Path
 
 from research_agent.config import Settings
 from research_agent.models import SourceName
+from research_agent.retrieval import run_indexing
 from research_agent.scheduler import ADAPTERS, build_scheduler, run_source
 from research_agent.storage import init_db
 
@@ -38,6 +40,12 @@ def _cmd_ingest(args: argparse.Namespace, settings: Settings) -> None:
         print(result.model_dump_json(indent=2))
 
 
+def _cmd_index(args: argparse.Namespace, settings: Settings) -> None:
+    init_db(settings.sqlite_path)
+    result = run_indexing(settings, limit=args.limit)
+    print(result)
+
+
 def _cmd_scheduler(args: argparse.Namespace, settings: Settings) -> None:
     init_db(settings.sqlite_path)
     scheduler = build_scheduler(settings, interval_hours=args.interval_hours)
@@ -60,6 +68,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_ingest.add_argument("--start-offset", type=int, default=None, help="arXiv only: page offset for deeper history")
     p_ingest.add_argument("--max-results", type=int, default=None, help="Cap on documents fetched this run")
 
+    p_index = sub.add_parser("index", help="Chunk/embed/index documents due for (re)indexing into Chroma")
+    p_index.add_argument("--limit", type=int, default=None, help="Cap on documents indexed this run")
+
     p_sched = sub.add_parser("scheduler", help="Run the recurring ingestion scheduler in the foreground")
     p_sched.add_argument("--interval-hours", type=int, default=24)
 
@@ -67,12 +78,24 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    # Always logs to a fixed file, not just the console - so a run started
+    # from any terminal (or by an agent, backgrounded) can be watched live
+    # from any other terminal with `tail -f data/logs/research-agent.log`,
+    # not just wherever the process happened to be launched from.
+    log_path = Path("data/logs/research-agent.log")
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        handlers=[logging.StreamHandler(), logging.FileHandler(log_path)],
+    )
     args = build_parser().parse_args()
     settings = Settings()
 
     if args.command == "ingest":
         _cmd_ingest(args, settings)
+    elif args.command == "index":
+        _cmd_index(args, settings)
     elif args.command == "scheduler":
         _cmd_scheduler(args, settings)
 
