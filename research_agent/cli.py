@@ -61,6 +61,19 @@ def _cmd_ask(args: argparse.Namespace, settings: Settings) -> None:
     print(json.dumps(report, indent=2, default=str))
 
 
+def _cmd_eval(args: argparse.Namespace, settings: Settings) -> None:
+    import json
+
+    from research_agent.evaluation import run_full_evaluation
+
+    result = run_full_evaluation(settings, include_agent=not args.skip_agent)
+    out_path = Path(args.output)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(result, indent=2, default=str))
+    print(json.dumps(result["summary"], indent=2))
+    print(f"\nFull detail written to {out_path}")
+
+
 def _cmd_scheduler(args: argparse.Namespace, settings: Settings) -> None:
     init_db(settings.sqlite_path)
     scheduler = build_scheduler(settings, interval_hours=args.interval_hours)
@@ -89,6 +102,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_ask = sub.add_parser("ask", help="Run the research agent end-to-end and print a research brief")
     p_ask.add_argument("question")
     p_ask.add_argument("--max-iterations", type=int, default=2)
+
+    p_eval = sub.add_parser("eval", help="Run the evaluation suite against the fixed query set")
+    p_eval.add_argument("--skip-agent", action="store_true", help="Retrieval-only pass, no LLM calls/API cost")
+    p_eval.add_argument("--output", default="data/eval_report.json")
 
     p_sched = sub.add_parser("scheduler", help="Run the recurring ingestion scheduler in the foreground")
     p_sched.add_argument("--interval-hours", type=int, default=24)
@@ -119,6 +136,8 @@ def main() -> None:
         _cmd_index(args, settings)
     elif args.command == "ask":
         _cmd_ask(args, settings)
+    elif args.command == "eval":
+        _cmd_eval(args, settings)
     elif args.command == "scheduler":
         _cmd_scheduler(args, settings)
 
