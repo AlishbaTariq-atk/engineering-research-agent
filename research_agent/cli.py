@@ -52,6 +52,15 @@ def _cmd_index(args: argparse.Namespace, settings: Settings) -> None:
     print(result)
 
 
+def _cmd_ask(args: argparse.Namespace, settings: Settings) -> None:
+    import json
+
+    from research_agent.agent import run_research_agent
+
+    report = run_research_agent(args.question, settings, max_iterations=args.max_iterations)
+    print(json.dumps(report, indent=2, default=str))
+
+
 def _cmd_scheduler(args: argparse.Namespace, settings: Settings) -> None:
     init_db(settings.sqlite_path)
     scheduler = build_scheduler(settings, interval_hours=args.interval_hours)
@@ -76,6 +85,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_index = sub.add_parser("index", help="Chunk/embed/index documents due for (re)indexing into Chroma")
     p_index.add_argument("--limit", type=int, default=None, help="Cap on documents indexed this run")
+
+    p_ask = sub.add_parser("ask", help="Run the research agent end-to-end and print a research brief")
+    p_ask.add_argument("question")
+    p_ask.add_argument("--max-iterations", type=int, default=2)
 
     p_sched = sub.add_parser("scheduler", help="Run the recurring ingestion scheduler in the foreground")
     p_sched.add_argument("--interval-hours", type=int, default=24)
@@ -104,6 +117,8 @@ def main() -> None:
         _cmd_ingest(args, settings)
     elif args.command == "index":
         _cmd_index(args, settings)
+    elif args.command == "ask":
+        _cmd_ask(args, settings)
     elif args.command == "scheduler":
         _cmd_scheduler(args, settings)
 
