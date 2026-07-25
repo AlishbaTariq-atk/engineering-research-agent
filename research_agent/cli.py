@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import time
 from pathlib import Path
 
 from research_agent.config import Settings
 from research_agent.models import SourceName
-from research_agent.retrieval import run_indexing
 from research_agent.scheduler import ADAPTERS, build_scheduler, run_source
 from research_agent.storage import init_db
 
@@ -41,6 +41,12 @@ def _cmd_ingest(args: argparse.Namespace, settings: Settings) -> None:
 
 
 def _cmd_index(args: argparse.Namespace, settings: Settings) -> None:
+    # Imported lazily: this pulls in sentence-transformers, which only the
+    # index/agent/eval commands need. Also means main() gets to set
+    # HF_HUB_OFFLINE (below) before this import chain ever touches
+    # huggingface_hub, not after.
+    from research_agent.retrieval import run_indexing
+
     init_db(settings.sqlite_path)
     result = run_indexing(settings, limit=args.limit)
     print(result)
@@ -91,6 +97,8 @@ def main() -> None:
     )
     args = build_parser().parse_args()
     settings = Settings()
+    if settings.hf_hub_offline:
+        os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
     if args.command == "ingest":
         _cmd_ingest(args, settings)

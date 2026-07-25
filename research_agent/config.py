@@ -20,6 +20,14 @@ class Settings(BaseSettings):
 
     # embeddings
     embedding_model: str = "BAAI/bge-small-en-v1.5"
+    # False by default so a first-time clone can still download the model.
+    # Once bge-small/the cross-encoder are cached locally, flipping this to
+    # true skips the dozens of HEAD requests HF's client makes to re-verify
+    # the cache on every load - found by timing a real server startup,
+    # which took 40+ seconds mostly waiting on huggingface.co, not on
+    # actual model loading. Matters for a live demo: startup shouldn't
+    # depend on Hub latency once the weights are already on disk.
+    hf_hub_offline: bool = False
 
     # generation - provider selected here, not in code
     llm_provider: str = "groq"  # "groq" | "ollama"
