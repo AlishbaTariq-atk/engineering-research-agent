@@ -45,7 +45,8 @@ class Settings(BaseSettings):
     # never "edit adapter code".
     github_repos: str = (
         "huggingface/transformers,vllm-project/vllm,langchain-ai/langchain,"
-        "pytorch/pytorch,ollama/ollama,ggerganov/llama.cpp"
+        "pytorch/pytorch,ollama/ollama,ggerganov/llama.cpp,"
+        "run-llama/llama_index,huggingface/peft"
     )
     rss_feeds: str = (
         "https://huggingface.co/blog/feed.xml,"

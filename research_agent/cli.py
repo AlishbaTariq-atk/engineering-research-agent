@@ -13,20 +13,23 @@ from research_agent.storage import init_db
 
 
 def _fetch_kwargs_for(source: SourceName, args: argparse.Namespace) -> dict:
-    """--max-results and --start-offset only exist on arxiv.fetch()'s
-    signature (the other three adapters have no equivalent concept - a
-    GitHub repo list or a curated standards-doc list isn't "capped" the
-    same way a paginated query is). Forwarding them unconditionally to
-    every adapter would raise TypeError; a shared **kwargs catch-all on
+    """Each adapter's fetch() has different tunable parameters - a GitHub
+    repo list or a curated standards-doc list isn't "capped" the same way
+    a paginated arXiv query is. Forwarding every flag to every adapter
+    unconditionally would raise TypeError; a shared **kwargs catch-all on
     every adapter would silently swallow a typo'd flag instead. So the CLI
     decides per source which flags are even meaningful."""
-    if source != SourceName.ARXIV:
-        return {}
-    kwargs = {}
-    if args.max_results is not None:
-        kwargs["max_results"] = args.max_results
-    if args.start_offset is not None:
-        kwargs["start_offset"] = args.start_offset
+    kwargs: dict = {}
+    if source == SourceName.ARXIV:
+        if args.max_results is not None:
+            kwargs["max_results"] = args.max_results
+        if args.start_offset is not None:
+            kwargs["start_offset"] = args.start_offset
+        if args.full_text_limit is not None:
+            kwargs["full_text_limit"] = args.full_text_limit
+    elif source == SourceName.GITHUB:
+        if args.max_pages_per_repo is not None:
+            kwargs["max_pages_per_repo"] = args.max_pages_per_repo
     return kwargs
 
 
@@ -94,7 +97,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_ingest.add_argument("source", choices=[*(s.value for s in ADAPTERS), "all"])
     p_ingest.add_argument("--backfill", action="store_true", help="Log this run's trigger as 'backfill'")
     p_ingest.add_argument("--start-offset", type=int, default=None, help="arXiv only: page offset for deeper history")
-    p_ingest.add_argument("--max-results", type=int, default=None, help="Cap on documents fetched this run")
+    p_ingest.add_argument("--max-results", type=int, default=None, help="arXiv only: cap on documents fetched this run")
+    p_ingest.add_argument(
+        "--full-text-limit", type=int, default=None, help="arXiv only: how many recent papers get full PDF text"
+    )
+    p_ingest.add_argument(
+        "--max-pages-per-repo", type=int, default=None, help="GitHub only: release-list pages fetched per repo (100/page)"
+    )
 
     p_index = sub.add_parser("index", help="Chunk/embed/index documents due for (re)indexing into Chroma")
     p_index.add_argument("--limit", type=int, default=None, help="Cap on documents indexed this run")
