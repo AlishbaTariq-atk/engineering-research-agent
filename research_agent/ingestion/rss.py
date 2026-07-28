@@ -1,3 +1,11 @@
+"""RSS adapter: posts from engineering blogs.
+
+Known limits, both imposed by the publishers rather than this code:
+feeds expose only their most recent posts, so there is no way to page back
+through older ones; and some feeds publish titles and links with no body
+text at all.
+"""
+
 from __future__ import annotations
 
 import logging
@@ -10,9 +18,7 @@ import feedparser
 from research_agent.config import Settings
 from research_agent.models import Document, SourceCategory, SourceName, StorageMode
 
-from .deduplicator import compute_content_hash, make_doc_id
-from .parser import clean_html
-from .pipeline import FetchFailure
+from .pipeline import FetchFailure, clean_html, compute_content_hash, make_doc_id
 
 SOURCE = SourceName.RSS_BLOG
 
@@ -20,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 
 def _entry_date(entry) -> date | None:
+    """Read an entry's publication date, if the feed provides one."""
     parsed = entry.get("published_parsed") or entry.get("updated_parsed")
     if not parsed:
         return None
@@ -27,75 +34,69 @@ def _entry_date(entry) -> date | None:
 
 
 def _entry_text(entry) -> tuple[str, str | None]:
-    """Returns (abstract, full_text). Feeds that publish full content
-    (entry.content) give us full_text for free; feeds that only publish a
-    teaser (entry.summary) get abstract_only - the feed publisher's own
-    choice decides storage_mode here, not ours."""
+    """Pull the summary and, where available, the full post body.
+
+    Feeds differ in how much they publish: some include the whole article,
+    others only a teaser. Whatever the feed provides is what gets stored.
+
+    Args:
+        entry: A parsed feed entry.
+
+    Returns:
+        The summary text, and the full body if the feed carries one that is
+        meaningfully longer than the summary.
+    """
     summary = clean_html(entry.get("summary", ""))
-    content_list = entry.get("content")
-    if content_list:
-        full = clean_html(content_list[0].get("value", ""))
-        if len(full) > len(summary) + 50:  # meaningfully more than just the teaser
-            return (summary or full[:500]), full
+    content = entry.get("content")
+    if content:
+        body = clean_html(content[0].get("value", ""))
+        if len(body) > len(summary) + 50:
+            return (summary or body[:500]), body
     return summary, None
 
 
-def fetch(settings: Settings, feed_urls: list[str] | None = None) -> Iterator[Document | FetchFailure]:
-    """One Document per feed entry.
+def fetch(settings: Settings) -> Iterator[Document | FetchFailure]:
+    """Fetch recent posts from every configured feed.
 
-    Each feed is parsed independently - a dead/unreachable feed URL yields
-    a FetchFailure (so it lands in ingestion_failures, not just a console
-    log line) and moves on rather than being fatal to the others.
+    Feeds are read independently, so an unreachable one is reported and
+    skipped without affecting the others.
 
-    Real limitation, documented rather than worked around: RSS backfill is
-    bounded by whatever the publisher's feed currently exposes (typically
-    the last 10-50 posts). Unlike arXiv/GitHub there is no pagination for
-    older entries here - deeper blog history would need a different
-    mechanism (sitemap crawl, web archive), which is out of scope.
+    Args:
+        settings: Provides the list of feed URLs.
 
-    Second real limitation: some feeds (e.g. Hugging Face's) publish only
-    title/link/date, no summary or content. Those become METADATA_ONLY
-    documents rather than a fabricated abstract - fetching and scraping the
-    linked article page for a real excerpt would fix this but adds a
-    per-entry HTTP request and a new failure mode, so it's left as a
-    documented gap rather than built under time pressure.
+    Yields:
+        One Document per post, plus a FetchFailure for any unreadable feed.
     """
-    urls = feed_urls if feed_urls is not None else settings.rss_feed_list
-
-    for feed_url in urls:
+    for feed_url in settings.rss_feed_list:
         try:
-            parsed = feedparser.parse(feed_url)
-            if parsed.bozo and not parsed.entries:
-                raise parsed.bozo_exception or ValueError("unparseable feed")
+            feed = feedparser.parse(feed_url)
+            if feed.bozo and not feed.entries:
+                raise feed.bozo_exception or ValueError("feed could not be parsed")
         except Exception as exc:
-            logger.warning("rss adapter: failed to fetch/parse %s (%s)", feed_url, exc)
+            logger.warning("RSS: could not read %s (%s)", feed_url, exc)
             yield FetchFailure(source_id=feed_url, url=feed_url, error_message=str(exc))
             continue
 
-        feed_title = parsed.feed.get("title", feed_url)
-        for entry in parsed.entries:
+        feed_title = feed.feed.get("title", feed_url)
+        for entry in feed.entries:
             source_id = entry.get("id") or entry.get("link")
             if not source_id:
                 continue
 
-            abstract, full_text = _entry_text(entry)
+            summary, body = _entry_text(entry)
             title = entry.get("title", "(untitled)")
-            now = datetime.now(UTC)
 
-            # Some feeds (e.g. Hugging Face's blog) publish title/link/date
-            # only - no summary, no content. Hashing "" there would collapse
-            # every such entry onto the same content_hash and manufacture
-            # thousands of false "duplicates" (this happened in testing).
-            # These are honestly METADATA_ONLY - the schema's exclusion of
-            # metadata_only docs from chunking/embedding is exactly this
-            # case - and the hash is derived from stable metadata instead.
-            if full_text or abstract:
-                storage_mode = StorageMode.FULL_TEXT if full_text else StorageMode.ABSTRACT_ONLY
-                content_hash = compute_content_hash(full_text or abstract)
+            if body or summary:
+                storage_mode = StorageMode.FULL_TEXT if body else StorageMode.ABSTRACT_ONLY
+                content_hash = compute_content_hash(body or summary)
             else:
+                # Title-only entries have no text to search or hash. Hashing
+                # the empty string would make every such post look like a
+                # copy of the others, so the hash is taken over its metadata.
                 storage_mode = StorageMode.METADATA_ONLY
                 content_hash = compute_content_hash(f"{source_id}:{title}")
 
+            now = datetime.now(UTC)
             yield Document(
                 doc_id=make_doc_id(SOURCE, source_id),
                 source=SOURCE,
@@ -103,9 +104,9 @@ def fetch(settings: Settings, feed_urls: list[str] | None = None) -> Iterator[Do
                 category=SourceCategory.PRACTITIONER_KNOWLEDGE,
                 canonical_url=entry.get("link", feed_url),
                 title=title,
-                abstract=abstract or None,
-                full_text=full_text,
-                tags=[t["term"] for t in entry.get("tags", [])] if entry.get("tags") else [],
+                abstract=summary or None,
+                full_text=body,
+                tags=[tag["term"] for tag in entry.get("tags", [])] if entry.get("tags") else [],
                 publication_date=_entry_date(entry),
                 ingested_at=now,
                 last_checked_at=now,

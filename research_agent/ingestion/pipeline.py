@@ -1,29 +1,113 @@
+"""The shared ingestion pipeline.
+
+Source adapters only fetch and map data into `Document` objects. Everything
+that must behave identically across sources — hashing, change detection,
+version history, duplicate detection, run logging — lives here, so it is
+written once rather than repeated in four adapters.
+"""
+
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 import sqlite3
 import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+import fitz  # PyMuPDF
+from bs4 import BeautifulSoup
 from pydantic import BaseModel
 
 from research_agent.models import Document, SourceName
-from research_agent.storage import get_connection
+from research_agent.storage import connect
 
-from .deduplicator import find_cross_source_duplicate
+
+# --------------------------------------------------------------------------
+# Text helpers used by the adapters
+# --------------------------------------------------------------------------
+
+
+def extract_pdf_text(pdf_bytes: bytes) -> str:
+    """Extract plain text from a PDF.
+
+    Args:
+        pdf_bytes: Raw bytes of the PDF file.
+
+    Returns:
+        The document text, or an empty string if the PDF is unreadable.
+        Returning empty rather than raising keeps one bad PDF from ending
+        the whole ingestion run.
+    """
+    try:
+        with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
+            return "\n".join(page.get_text() for page in doc)
+    except Exception:
+        return ""
+
+
+def clean_html(html: str) -> str:
+    """Strip HTML markup down to readable text.
+
+    Args:
+        html: An HTML fragment or document.
+
+    Returns:
+        Visible text with script and style blocks removed.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in soup(["script", "style"]):
+        tag.decompose()
+    return soup.get_text(separator=" ", strip=True)
+
+
+def make_doc_id(source: SourceName, source_id: str) -> str:
+    """Build the stable identifier for a source item.
+
+    The same source and source_id always produce the same id, so re-fetching
+    an item updates the existing row instead of inserting a near-duplicate.
+
+    Args:
+        source: Which source the item came from.
+        source_id: The source's own identifier for the item.
+
+    Returns:
+        A 24-character hex string.
+    """
+    return hashlib.sha256(f"{source.value}:{source_id}".encode()).hexdigest()[:24]
+
+
+def compute_content_hash(text: str) -> str:
+    """Hash a document's text to detect real content changes.
+
+    Whitespace is collapsed first, so a source re-serving the same text with
+    different line wrapping does not register as an edit.
+
+    Args:
+        text: The document's full text, or its abstract if there is no full text.
+
+    Returns:
+        A hex sha256 digest.
+    """
+    normalised = re.sub(r"\s+", " ", text or "").strip()
+    return hashlib.sha256(normalised.encode()).hexdigest()
+
+
+# --------------------------------------------------------------------------
+# Pipeline results
+# --------------------------------------------------------------------------
 
 
 @dataclass
 class FetchFailure:
-    """Yielded by an adapter instead of a Document when a specific item
-    (one repo, one feed, one curated URL) fails to fetch. Adapters could
-    just log a warning and skip - but that failure would then be invisible
-    to anything reading ingestion_runs/ingestion_failures, undercounting
-    exactly the "failure reporting" the assessment asks for. Adapters stay
-    DB-free (only pipeline.py touches SQLite) by yielding this instead of
-    writing to the failures table themselves."""
+    """An item an adapter could not fetch.
+
+    Adapters yield this instead of a `Document` so that failures are counted
+    and stored by the pipeline, rather than disappearing into a log line.
+    Keeping it a yielded value also means adapters never touch the database.
+    """
 
     source_id: str
     url: str
@@ -31,8 +115,7 @@ class FetchFailure:
 
 
 class IngestionResult(BaseModel):
-    """Exactly the log statistics the assessment asks for, plus the
-    duplicate count since that's a separate reported capability."""
+    """Counts describing a single ingestion run."""
 
     run_id: str
     source: str
@@ -44,11 +127,34 @@ class IngestionResult(BaseModel):
     duplicates_detected: int = 0
 
 
-def _document_exists(conn: sqlite3.Connection, doc_id: str) -> sqlite3.Row | None:
-    return conn.execute("SELECT * FROM documents WHERE doc_id = ?", (doc_id,)).fetchone()
+# --------------------------------------------------------------------------
+# Database operations
+# --------------------------------------------------------------------------
 
 
-def _insert_document(conn: sqlite3.Connection, doc: Document) -> None:
+def _find_duplicate_content(conn: sqlite3.Connection, content_hash: str, exclude_doc_id: str) -> sqlite3.Row | None:
+    """Look for the same content already stored under a different document.
+
+    This catches cross-posted content, such as a paper mirrored on both
+    arXiv and a project's GitHub. It is a different check from re-fetching
+    the same item, which `make_doc_id` already handles.
+
+    Args:
+        conn: Open database connection.
+        content_hash: Hash of the incoming document's text.
+        exclude_doc_id: The incoming document's own id, so it cannot match itself.
+
+    Returns:
+        The existing row, or None if this content is new.
+    """
+    return conn.execute(
+        "SELECT * FROM documents WHERE content_hash = ? AND doc_id != ? LIMIT 1",
+        (content_hash, exclude_doc_id),
+    ).fetchone()
+
+
+def _insert(conn: sqlite3.Connection, doc: Document) -> None:
+    """Insert a new document and open its version history."""
     conn.execute(
         """
         INSERT INTO documents (
@@ -71,12 +177,13 @@ def _insert_document(conn: sqlite3.Connection, doc: Document) -> None:
     )
     conn.execute(
         "INSERT INTO document_versions (doc_id, version, content_hash, captured_at, change_summary) "
-        "VALUES (?, ?, ?, ?, ?)",
-        (doc.doc_id, doc.version, doc.content_hash, doc.ingested_at.isoformat(), "initial ingestion"),
+        "VALUES (?, ?, ?, ?, 'initial ingestion')",
+        (doc.doc_id, doc.version, doc.content_hash, doc.ingested_at.isoformat()),
     )
 
 
-def _update_document(conn: sqlite3.Connection, doc: Document, new_version: int, change_summary: str) -> None:
+def _update(conn: sqlite3.Connection, doc: Document, new_version: int, change_summary: str) -> None:
+    """Overwrite a document's content and append a version-history row."""
     now = datetime.now(UTC).isoformat()
     conn.execute(
         """
@@ -100,87 +207,91 @@ def _update_document(conn: sqlite3.Connection, doc: Document, new_version: int, 
     )
 
 
-def _touch_last_checked(conn: sqlite3.Connection, doc_id: str) -> None:
+def _record_failure(conn: sqlite3.Connection, run_id: str, source_id: str, url: str, message: str) -> None:
+    """Store one failed item against the run that encountered it."""
     conn.execute(
-        "UPDATE documents SET last_checked_at = ? WHERE doc_id = ?",
-        (datetime.now(UTC).isoformat(), doc_id),
+        "INSERT INTO ingestion_failures (run_id, source_id, url, error_message, occurred_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (run_id, source_id, url, message, datetime.now(UTC).isoformat()),
     )
 
 
 def run_ingestion(
-    source_name: SourceName,
-    documents: Iterator[Document | FetchFailure],
+    source: SourceName,
+    items: Iterator[Document | FetchFailure],
     db_path: str,
     trigger: str = "manual",
 ) -> IngestionResult:
-    """Generic upsert + logging loop shared by every adapter. Each adapter
-    is responsible only for producing valid Document objects (fetch, parse,
-    map fields) or a FetchFailure for an item it couldn't fetch; idempotency,
-    versioning, duplicate detection, and run logging all live here exactly
-    once, so every source gets them for free and can't drift from each other.
+    """Store everything an adapter produces, and log the run.
 
-    Commits per-item (not once at the end): if the `documents` generator
-    itself raises partway through (e.g. a network drop on page 6 of an
-    arXiv query), everything already processed in this run stays committed
-    and the run is logged as 'failed' with a summary - a transient failure
-    loses nothing already ingested.
+    For each document: unchanged content is skipped (only its
+    last-checked timestamp moves), changed content bumps the version and
+    appends to the version history, and anything unseen is inserted.
+
+    Each item is committed on its own. If the adapter fails partway through
+    — a dropped connection mid-pagination, say — everything already stored
+    stays stored, and the run is recorded as failed.
+
+    Args:
+        source: Which source is being ingested.
+        items: Documents from the adapter, plus FetchFailure entries for
+            items it could not retrieve.
+        db_path: Path to the SQLite database.
+        trigger: What started this run: 'scheduled', 'manual', or 'backfill'.
+
+    Returns:
+        Counts of documents fetched, added, updated, skipped, and failed.
+
+    Raises:
+        Exception: Re-raised if the adapter itself fails, after the run has
+            been marked failed in the database.
     """
     run_id = str(uuid.uuid4())
-    conn = get_connection(db_path)
-    result = IngestionResult(run_id=run_id, source=source_name.value)
-    started_at = datetime.now(UTC).isoformat()
+    conn = connect(db_path)
+    result = IngestionResult(run_id=run_id, source=source.value)
+
     conn.execute(
         "INSERT INTO ingestion_runs (run_id, source, trigger, started_at, status) VALUES (?, ?, ?, ?, 'running')",
-        (run_id, source_name.value, trigger, started_at),
+        (run_id, source.value, trigger, datetime.now(UTC).isoformat()),
     )
     conn.commit()
 
     try:
-        for item in documents:
+        for item in items:
             result.fetched += 1
 
             if isinstance(item, FetchFailure):
                 result.failed += 1
-                conn.execute(
-                    "INSERT INTO ingestion_failures (run_id, source_id, url, error_message, occurred_at) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (run_id, item.source_id, item.url, item.error_message, datetime.now(UTC).isoformat()),
-                )
+                _record_failure(conn, run_id, item.source_id, item.url, item.error_message)
                 conn.commit()
                 continue
 
-            doc = item
             try:
-                existing = _document_exists(conn, doc.doc_id)
+                existing = conn.execute(
+                    "SELECT content_hash, version FROM documents WHERE doc_id = ?", (item.doc_id,)
+                ).fetchone()
+
                 if existing is None:
-                    if find_cross_source_duplicate(conn, doc.content_hash, doc.doc_id) is not None:
+                    if _find_duplicate_content(conn, item.content_hash, item.doc_id):
+                        # Counted, but still stored: each source has its own
+                        # URL and is worth citing independently.
                         result.duplicates_detected += 1
-                        # Still stored, not merged: an independent source has its
-                        # own canonical_url and citation value. See deduplicator.py.
-                    _insert_document(conn, doc)
+                    _insert(conn, item)
                     result.new += 1
-                elif existing["content_hash"] != doc.content_hash:
-                    _update_document(
-                        conn, doc,
-                        new_version=existing["version"] + 1,
-                        change_summary=f"content changed on re-check (source={source_name.value})",
-                    )
+                elif existing["content_hash"] != item.content_hash:
+                    _update(conn, item, existing["version"] + 1, f"content changed ({source.value})")
                     result.updated += 1
                 else:
-                    _touch_last_checked(conn, doc.doc_id)
+                    conn.execute(
+                        "UPDATE documents SET last_checked_at = ? WHERE doc_id = ?",
+                        (datetime.now(UTC).isoformat(), item.doc_id),
+                    )
                     result.skipped += 1
                 conn.commit()
             except Exception as exc:
                 conn.rollback()
                 result.failed += 1
-                conn.execute(
-                    "INSERT INTO ingestion_failures (run_id, source_id, url, error_message, occurred_at) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (
-                        run_id, doc.source_id, str(doc.canonical_url), str(exc),
-                        datetime.now(UTC).isoformat(),
-                    ),
-                )
+                _record_failure(conn, run_id, item.source_id, str(item.canonical_url), str(exc))
                 conn.commit()
 
         conn.execute(

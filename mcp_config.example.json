@@ -1,9 +1,0 @@
-{
-  "mcpServers": {
-    "research-agent": {
-      "command": "/ABSOLUTE/PATH/TO/Engineering_Research_Agent/.venv/bin/python",
-      "args": ["-m", "research_agent.mcp_server.server"],
-      "cwd": "/ABSOLUTE/PATH/TO/Engineering_Research_Agent"
-    }
-  }
-}

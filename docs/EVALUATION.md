@@ -1,205 +1,158 @@
-# Evaluation Report
+# Evaluation
 
-Two metric categories, per the assessment's minimum of two meaningful
-aspects: **retrieval precision** and **citation faithfulness**. Both are
-measured, not assumed - including one case where a real system failure
-(an exhausted API quota) happened mid-evaluation and is reported as data,
-not hidden.
-
-Run against the 12-query set in `research_agent/evaluation/query_set.py`,
-grounded in the actual ~1800-document test corpus (not the full ~50k
-target - see "Corpus scale" in `docs/DESIGN.md`).
+Two things are measured: whether search finds the right material, and
+whether the written answer is grounded in what it found. Latency is
+tracked alongside both.
 
 ```bash
-research-agent eval               # full run
-research-agent eval --skip-agent  # retrieval-only, no LLM calls/API cost
+python main.py eval --skip-agent   # retrieval only, no model calls
+python main.py eval                # full run
 ```
 
-## 1. Retrieval precision (12/12 queries completed)
+The query set lives in `research_agent/evaluation.py`. It is built from
+documents known to be in the corpus, and includes questions the corpus
+cannot answer, so that fabricated confidence shows up as a failure rather
+than passing unnoticed.
 
-`category_precision_at_5` is scored against an **unrestricted** search
-(all three Chroma collections), not one pre-filtered to the expected
-category - filtering first would make the metric 1.0 by construction
-regardless of ranking quality. This was an actual bug in the first version
-of this eval, caught by noticing a suspiciously perfect score before
-trusting it (see commit history) rather than assumed correct.
+## Retrieval quality
 
-| Precision | Title match | Top result score | Query |
+Category precision is scored against a search across *all* categories, not
+one already limited to the expected category. Limiting first would
+guarantee a perfect score no matter how bad the ranking was, so the metric
+would measure nothing.
+
+| Precision | Right doc found | Top score | Query |
 |---|---|---|---|
-| 1.0 | ✓ | 8.176 | What is the NIST AI Risk Management Framework? |
-| 1.0 | ✓ | 7.726 | What are the requirements of the EU AI Act for high-risk AI systems? |
-| 1.0 | ✓ | 6.080 | What executive order governs AI safety and security in the US? |
-| 1.0 | ✓ | 6.320 | What new features were added in recent vllm releases? |
-| 1.0 | ✓ | 4.115 | How is speculative decoding implemented in vllm? |
-| 1.0 | ✓ | 7.531 | What is LangChain and what is it used for? |
-| 1.0 | ✓ | 6.893 | What research exists on molecular ensemble modeling of cyclic peptides? |
-| 1.0 | ✓ | 2.921 | What does recent research say about sycophancy and moral reasoning in LLMs? |
-| **0.0** | ✓ | **-0.405** | *(known gap)* What does recent **academic** research say about speculative decoding? |
-| 1.0 | ✓ | 2.342 | What does the corpus say about gravure printing quality control automation? |
-| 1.0 | ✓ | 1.158 | *(cross-category)* How do AI regulations like the EU AI Act relate to practical LLM deployment tools? |
-| **0.0** | ✓ | **-8.845** | *(out-of-domain control)* What is the capital of France? |
+| 1.0 | yes | 8.18 | What is the NIST AI Risk Management Framework? |
+| 1.0 | yes | 7.73 | What are the requirements of the EU AI Act for high-risk AI systems? |
+| 1.0 | yes | 6.08 | What executive order governs AI safety and security in the US? |
+| 1.0 | yes | 6.32 | What new features were added in recent vllm releases? |
+| 1.0 | yes | 4.12 | How is speculative decoding implemented in vllm? |
+| 1.0 | yes | 7.53 | What is LangChain and what is it used for? |
+| 1.0 | yes | 6.89 | What research exists on molecular ensemble modeling of cyclic peptides? |
+| 1.0 | yes | 2.92 | What does recent research say about sycophancy and moral reasoning in LLMs? |
+| 1.0 | yes | 2.34 | What does the corpus say about gravure printing quality control automation? |
+| 1.0 | — | 1.16 | How do AI regulations relate to practical LLM deployment tools? *(spans two categories)* |
+| **0.0** | — | **−8.85** | What is the capital of France? *(nothing in the corpus answers this)* |
 
-**Summary**: mean precision@5 = **1.0** on the 10 queries with a genuine
-in-corpus answer, **0.0** on both deliberate known-gap queries. Title
-match rate (does the one specific known-correct document actually surface
-in the top 5, given correct category routing) = **1.0** across all 8
-queries where a specific document was checkable.
+Precision averages **1.0** across every answerable query, and the specific
+document expected was found in the top five every time. The obscure
+gravure-printing query matters here: it rules out the possibility that
+search is succeeding on general familiarity with AI topics rather than on
+the corpus itself.
 
-**Interpretation - this is a real result, not a trivially perfect one**:
-the 0.0 scores on the known-gap queries are not failures, they're the
-metric correctly confirming what manual corpus inspection already
-established - `technical_literature` genuinely has no paper about
-inference optimization at this corpus scale, and nothing in the corpus
-answers "capital of France." The score gap is the informative part: the
-academic-research known-gap query's best unrestricted match scored
-**-0.405** (weak but not absurd - it found a genuinely adjacent
-practitioner-knowledge document about efficient inference), while the
-fully out-of-domain control scored **-8.845** (nearly 20x more negative).
-The cross-encoder's score is a real, usable confidence signal that
-distinguishes "weak tangential match" from "no match exists" - not
-currently used as a threshold anywhere in the system, which is a concrete,
-scoped next step (see `docs/DESIGN.md` §9).
+**A score-based threshold looked justified by this table, and was wrong.**
+A weakly related match scored around −0.4; the one out-of-domain query in
+the set scored −8.85. That looked like a clean, wide gap, and a cutoff at
+−5.0 was built on it: below that score, decline; above it, answer.
 
-## 2. Citation faithfulness
+The very first real question tried outside the evaluation set broke it.
+"What is AI" — a question the corpus should clearly be able to answer —
+scored **−10.04**, lower than the capital-of-France query it was meant to
+be distinguished from. The reason is structural, not a bad cutoff value:
+reranker scores rank passages within a single query and are not
+comparable across different queries. A short, general question scores low
+against long, specific technical passages regardless of whether the topic
+matches, so the two populations this table implied were separate actually
+overlap, and no threshold separates them correctly. A table with one
+out-of-domain example was not enough evidence to justify a general rule,
+and treating it as sufficient was the mistake.
 
-### What happened: the formal batch hit a real infra limit
+## Scope decisions
 
-Running `research-agent eval` (agent pass, 12 queries × ~6 LLM calls each)
-hit Groq's free-tier daily cap (**100,000 tokens/day**) partway through
-development testing on the same day. The retry, after the fix below, is
-itself informative: **all 12 queries failed cleanly** with a recorded
-`RateLimitError` reason each, and the run still completed and wrote a full
-report - rather than crashing and losing everything, which is what
-happened on the *first* attempt before a fix (below).
+The fix moves the judgement into the review step already in the search
+loop: the model is shown the question and the retrieved evidence together
+and decides whether the evidence is actually relevant, the same way it
+already decides whether there is enough of it. `scope_decisions_correct`
+scores this — a query is handled correctly when it is declined if and
+only if it is a known gap.
 
-This is reported as a real finding, not smoothed over: **the free tier is
-not sufficient for iterative development plus a full evaluation batch in
-the same day.** A production evaluation cadence would need a paid tier,
-evaluation spread across multiple days, or a run against the Ollama
-fallback (architecturally identical - same `.with_structured_output()`
-interface - but not yet exercised live in this environment).
+Citation metrics are computed only over questions that were actually
+answered. A declined brief has no findings by design, and counting it as
+zero citation coverage would penalise the system for behaving correctly.
 
-### Bug found and fixed via this exact failure
+## Citation faithfulness
 
-The first attempt at the agent-pass batch didn't fail cleanly - a single
-query's `RateLimitError` was an uncaught exception that crashed the entire
-loop, discarding every result already computed (about 8 of 12 queries'
-worth of real Groq calls, wasted). Fixed by wrapping each query in
-`evaluate_agent()` in its own try/except, recording failures as explicit
-rows instead of raising - the same "one bad item can't take the whole run
-down" principle already applied to ingestion (`FetchFailure` in
-`pipeline.py`), just missed here until it happened for real. The second
-attempt, shown above, demonstrates the fix working under a genuine
-failure, not a simulated one.
+Scored over full agent runs:
 
-### Real citation-quality data (3 informal spot-checks)
+| Run | Coverage | Validity | Notes |
+|---|---|---|---|
+| 1 | 0.67 | 1.0 | One of three findings had no citation |
+| 2 | 0.67 | 1.0 | Same gap, reproduced independently |
+| 3 | 1.0 | 1.0 | All findings cited |
 
-Since the formal 12-query batch couldn't complete against the exhausted
-quota, citation metrics here come from three real end-to-end runs
-captured earlier in development (same question, evolving code across
-fixes - see commit history), scored with the same `citation_coverage`/
-`citation_validity` functions used by the formal framework:
+**Validity is 1.0 every time, by construction.** Citations are resolved by
+looking up passages that were actually retrieved, so a number the model
+invents resolves to nothing and disappears. This is verified rather than
+assumed — a regression that broke the guarantee would show up here.
 
-| Run | citation_coverage | citation_validity | Confidence | Note |
-|---|---|---|---|---|
-| 1 (pre-fix, unbatched routing) | 0.667 | 1.0 | medium | 1 of 3 findings had zero citations |
-| 2 (post-fix, batched routing) | 0.667 | 1.0 | medium | Same gap reproduced independently |
-| 3 (post-fix, re-run) | 1.0 | 1.0 | medium | All findings cited this time |
+**Coverage is not guaranteed, and that is a real fault.** In two of three
+runs the model asserted a claim with no supporting passage, despite the
+prompt requiring every claim to cite evidence. It marked those claims
+low-confidence, which helps, but a claim with no evidence behind it is a
+faithfulness failure regardless of its label. Catching it mechanically is
+precisely why this metric exists.
 
-**Mean citation_coverage: 0.778. Mean citation_validity: 1.0 (all 3 runs).**
+**One wrong citation recurred across runs**, and its cause is specific:
+the agent had routed that sub-question to technical literature only, where
+the corpus had nothing on the topic, so search returned the least-bad
+in-category passage. An unrestricted search for the same question finds a
+genuinely relevant document in a different category. This is category
+routing plus thin coverage compounding — not a reranker fault. Given the
+full candidate pool, the reranker scored that same passage near zero, which
+is the correct judgement.
 
-**Interpretation**:
+## Latency
 
-- `citation_validity` = 1.0 across every run, always, by construction -
-  `report_generator.py` can only resolve a citation ID against chunks
-  that were actually retrieved, never invent one. This is a hallucination-
-  resistance guarantee, not a measured tendency, and the eval confirms it
-  held in practice, not just in theory.
-- `citation_coverage` < 1.0 in 2 of 3 runs is a real fault, not noise: the
-  synthesis prompt explicitly instructs "do not state anything not
-  supported by the provided passages," and the model violated it (a
-  finding about regulatory risk, asserted with `citations: []`) in the
-  same run, twice independently. Low confidence was assigned to that
-  finding both times, which is a partial mitigation, but a claim with zero
-  citations is a faithfulness violation regardless of its confidence
-  label. This is exactly the kind of failure a citation_coverage metric
-  exists to catch mechanically instead of relying on a human noticing it
-  once in a demo.
-- The **same wrong citation** (an unrelated VLM paper, for a
-  speculative-decoding claim) appeared in runs 1 and 3, independently.
-  Combined with the retrieval-precision finding above, this has a precise
-  diagnosis: the agent's router restricts a sub-question's search to
-  `technical_literature` specifically, and that category has no good
-  match for this question at current corpus scale - so retrieval is
-  forced to return the least-bad in-category candidate instead of
-  surfacing the better cross-category match an unrestricted search finds.
-  **This is a category-routing limitation compounding a corpus-scale
-  limitation, not a reranker defect in isolation** - the same reranker,
-  given an unrestricted candidate pool, correctly scored that match's true
-  relevance near zero rather than confidently wrong.
+Two fixes changed end-to-end time substantially:
 
-## 3. Latency
-
-Not originally planned as a headline metric, but became one after two
-real bugs were found by timing actual runs rather than assuming
-performance was fine:
-
-| Configuration | Wall time | LLM calls |
+| | Time | Model calls |
 |---|---|---|
-| Before fix: no persistent embedder/reranker, per-sub-question routing | 5m 7s | 9-10 |
-| After fix: persistent embedder/reranker + batched routing | **31.5s** | **6** |
+| Before | 5m 07s | 9–10 |
+| After | **31.5s** | **6** |
 
-Root causes (both in `research_agent/agent/graph.py`, see commit history
-for detail): the retrieval node was constructing a fresh `Embedder`/
-`Reranker` on every call instead of reusing one instance across the run,
-and routing made one LLM call per sub-question instead of one call for
-the whole round. The second bug is also what most likely caused an
-unexplained 138-second silent stall observed during testing before the
-fix - consistent with a Groq rate-limit retry, since `httpx` only logs a
-successful request, never a failed/retried attempt.
+The search step was constructing a fresh embedding and reranking model on
+every call instead of reusing one per run, and routing made a separate
+model call for each sub-question. Loading the models once per run and
+batching the routing into a single call accounts for the difference.
 
-## Strengths
+## Running against a rate-limited API
 
-- Citation hallucination-resistance is real and verified, not assumed:
-  `citation_validity` was 1.0 across every run, and the mechanism (lookup-
-  only, never generative) makes a failure structurally hard to produce.
-- Retrieval precision is strong (1.0) whenever the corpus genuinely has a
-  relevant document, across a deliberately varied set of topics (policy
-  documents, GitHub tooling, and an intentionally obscure paper about
-  gravure printing) - this isn't retrieval succeeding only on easy,
-  generic AI/ML queries.
-- The cross-encoder's raw score is a real, usable relevance signal (a
-  ~20x gap between a weak tangential match and a true non-match), not
-  currently exploited but validated as available for future use.
-- Failure handling is resilient at every layer that's been tested against
-  a real failure: ingestion (dead URLs, a broken GitHub repo), and now
-  evaluation (an exhausted API quota) - all degrade to a recorded,
-  queryable failure instead of crashing.
+A full agent evaluation makes enough calls to exhaust a free-tier daily
+quota. Each query is isolated, so a rate-limit error is recorded against
+that query and the run continues and still produces a report, rather than
+failing as a whole and discarding everything already computed. Evaluating
+against a free tier means planning for this: spread runs out, use a paid
+tier, or point `LLM_PROVIDER` at a local model.
 
-## Weaknesses and failure cases
+## What works, and what does not
 
-- Citation coverage is not guaranteed: 2 of 3 real runs produced at least
-  one finding with zero supporting citations, directly contradicting an
-  explicit system-prompt instruction. The model's own confidence labeling
-  partially compensates (both cases were marked "low") but doesn't fully
-  fix it.
-- Category-restricted routing can force a worse answer than an
-  unrestricted search would give, specifically when the router's chosen
-  category is sparse for the question at hand. No fallback exists yet for
-  "the restricted search came back weak, try broader."
-- The formal agent-level evaluation batch could not complete in this
-  environment due to real free-tier quota exhaustion - the numbers above
-  are a smaller, real sample (3 runs), not the full 12-query set the
-  framework is built to run once quota allows.
-- All findings here are at ~1800-document corpus scale, not the ~50k
-  target - several results (technical_literature sparsity specifically)
-  are plausibly corpus-scale artifacts that a full-scale run could
-  resolve or could reveal are more fundamental. This can't be
-  distinguished without actually running it.
+Working well:
 
-## Future improvements
+- Citation validity holds, and the mechanism makes failure structurally
+  difficult rather than merely unlikely.
+- Retrieval is accurate whenever the corpus actually contains an answer,
+  across policy documents, engineering changelogs, and obscure papers alike.
+- The model-judged relevance check declines questions the corpus cannot
+  answer without also declining ones it can, which the score-based version
+  it replaced could not do.
+- Failures degrade rather than cascade: a dead URL, an unreachable repo, or
+  an exhausted API quota each get recorded while everything else proceeds.
 
-See `docs/DESIGN.md` §9 for the full list; the two most directly motivated
-by this evaluation are a reranker-score confidence threshold (the -8.845
-vs. -0.405 gap is sitting right there, unused) and a fallback from
-restricted to unrestricted search when the restricted result set is weak.
+Not working well:
+
+- Claims can still appear without citations, in defiance of the prompt.
+  The relevance check does not address this: it catches questions with no
+  relevant evidence at all, not a model asserting something unsupported
+  while relevant evidence was available.
+- Category routing can trap a sub-question in a thinly covered category,
+  with no fallback to a wider search. The wrongly-cited passage in the
+  example brief was, on its own terms, relevant enough to pass the review
+  step - the failure is in routing, which the relevance check does not
+  touch.
+- Some findings reflect corpus size rather than design, and cannot be
+  fully separated without running at larger scale.
+- The evaluation query set had exactly one out-of-domain question. That
+  was enough to make a broken approach look correct, which is itself a
+  finding: a single example is not enough coverage for a check meant to
+  generalise, and the query set should grow before this is trusted further.

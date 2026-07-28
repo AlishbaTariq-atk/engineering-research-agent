@@ -1,55 +1,53 @@
-# Example Research Brief
+# Example Output
 
-Real captured output from `research-agent ask`, run against the live
-system (Groq `llama-3.3-70b-versatile`, ~1800-document test corpus).
-Reproduced verbatim - including a real quality issue, annotated rather
-than edited out, since an honest example is more useful than a flattering
-one.
+A real session, reproduced as it ran. It includes a wrong citation, kept
+here and explained rather than replaced with a cleaner run.
 
-**Command:**
-```bash
-research-agent ask "What is speculative decoding, what are its tradeoffs for LLM inference, and are there relevant AI regulatory considerations?"
+```
+$ python main.py
+
+Research Assistant
+Ask a technical question and get an evidence-backed brief.
+Type 'exit' or press Ctrl-C to quit.
+
+Knowledge base: 4828 documents, 4200 indexed for search.
+
+Question> What is speculative decoding, what are its tradeoffs for LLM
+          inference, and are there relevant AI regulatory considerations?
 ```
 
-**Total time**: 31.5s · **LLM calls**: 6 (1 plan, 2 routing rounds, 2 gap-checks, 1 synthesis)
+Six model calls, 31.5 seconds: one to plan, two rounds of routing, two gap
+checks, one to write.
 
 ---
 
-## Executive Summary
+## Summary
 
 > Speculative decoding is a technique used in LLM inference that allows for
 > self-speculative decoding, where the model decodes with earlier layers
-> and verifies with remaining layers. The tradeoffs of using speculative
-> decoding include a potential decrease in speed, but it can also lead to
-> increased efficiency and accuracy. Relevant AI regulatory considerations
-> include ensuring that the use of speculative decoding does not compromise
-> the fairness, transparency, and accountability of AI systems.
+> and verifies with remaining layers. The tradeoffs include a potential
+> decrease in speed, but it can also lead to increased efficiency and
+> accuracy. Relevant AI regulatory considerations include ensuring that its
+> use does not compromise the fairness, transparency, and accountability of
+> AI systems.
 
-## Key Findings
+## Key findings
 
-| Claim | Confidence | Citation |
+| Claim | Confidence | Source |
 |---|---|---|
-| Speculative decoding is a technique used in LLM inference that allows for self-speculative decoding. | High | [2] transformers v4.47.0 release notes |
-| The tradeoffs of using speculative decoding include a potential decrease in speed. | Medium | [7] *3D-Aware VLMs with Implicit and Explicit Geometries* (arXiv) |
-| Speculative decoding can lead to increased efficiency and accuracy. | Medium | [8] vllm v0.5.4 release notes |
+| Speculative decoding allows a model to decode with earlier layers and verify with the rest. | high | [2] transformers v4.47.0 release notes |
+| Tradeoffs include a potential decrease in speed. | medium | [7] *3D-Aware VLMs with Implicit and Explicit Geometries* |
+| It can lead to increased efficiency and accuracy. | medium | [8] vllm v0.5.4 release notes |
 
-**⚠️ Known issue, not edited out:** citation [7] is wrong. That arXiv paper
-is about vision-language model geometry, not speculative decoding - it was
-cited because the test corpus's `technical_literature` category (15
-arbitrary recent papers) has no real paper on inference optimization, and
-the router restricted that sub-question's search to `technical_literature`
-only. See `docs/EVALUATION.md` for the root-cause analysis: an unrestricted
-search for the same underlying question correctly finds a genuinely
-relevant *practitioner_knowledge* result instead. This is a corpus-scale
-and category-routing limitation, documented and measured, not silently
-shipped.
+**Citation [7] is wrong.** That paper is about vision-language model
+geometry and has nothing to do with speculative decoding. The agent had
+routed that sub-question to technical literature alone, and the corpus held
+no paper on inference optimisation, so search returned the closest thing
+available rather than nothing. This is a category-routing gap, not a
+scope-detection one - see the next section for the distinction, and
+`EVALUATION.md` for the full analysis.
 
-## Conflicts
-
-None identified in this run (the corpus at test scale didn't surface
-disagreeing sources for this question).
-
-## Citations
+## Sources
 
 | # | Title | Source | Date |
 |---|---|---|---|
@@ -57,28 +55,45 @@ disagreeing sources for this question).
 | 7 | 3D-Aware VLMs with Implicit and Explicit Geometries | arxiv | 2026-07-23 |
 | 8 | vllm-project/vllm v0.5.4 | github | 2024-08-05 |
 
-## Confidence Assessment
+## Overall confidence
 
-**Medium.**
+Medium.
 
-## Identified Knowledge Gaps
+## Knowledge gaps
 
 - The impact of speculative decoding on AI regulatory considerations is not fully understood.
-- The current evidence does not provide a comprehensive overview of speculative decoding, its tradeoffs for LLM inference, and relevant AI regulatory considerations. Further research is needed.
-- There is a lack of information on the potential risks and challenges associated with speculative decoding, such as potential biases or errors in the decoding process.
-- The evidence retrieved so far is mostly focused on the technical aspects of speculative decoding, with little discussion on its ethical and societal implications.
+- The evidence does not give a comprehensive picture of the technique, its tradeoffs, and the regulatory position together.
+- There is little on the risks involved, such as bias or errors introduced during decoding.
+- What was retrieved is largely technical, with little on ethical or societal implications.
 
-## Recommended Follow-up Questions
+## Suggested follow-ups
 
-- What are the specific AI regulatory considerations that need to be addressed when using speculative decoding in LLM inference?
-- How can speculative decoding be optimized to minimize its potential decrease in speed while maximizing its benefits in terms of efficiency and accuracy?
+- What specific AI regulatory considerations apply to speculative decoding in LLM inference?
+- How can speculative decoding be optimised to reduce its speed cost while keeping its efficiency and accuracy gains?
 
 ---
 
-Note the system's own `knowledge_gaps` output correctly flagged that the
-regulatory angle was thin - which it was: none of the three curated
-standards documents (NIST AI RMF, EU AI Act, US EO 14110) discuss
-inference-time techniques specifically, they're general AI governance
-frameworks. The gap-detection mechanism worked as designed even though the
-citation-precision mechanism didn't, in the same run - both are reported
-honestly in `docs/EVALUATION.md` rather than only showing the parts that worked.
+Worth noting: the system correctly flagged the regulatory angle as thin,
+and it was. The three standards documents in the corpus are general
+governance frameworks and say nothing about inference-time techniques.
+The gap detection worked in the same run where a citation did not, which
+is why both appear here.
+
+## A question the knowledge base cannot answer
+
+Asking something clearly outside the domain - "What is the capital of
+France?" - stops after the review step rather than assembling an answer
+from whatever search came closest. The model is shown the retrieved
+passages next to the question and judges that none of them, an AI
+regulation and a couple of unrelated technical papers among them, actually
+address it. The reply names what was found and why it does not answer the
+question, in the same `OUT OF SCOPE` format `main.py` prints for any
+declined question.
+
+*A verbatim transcript belongs here once one is captured against the
+current code. An earlier version of this section showed output from a
+different approach to this check - comparing a search score against a
+fixed cutoff - which produced wrong results on ordinary questions and was
+replaced with the judgement described above. See `DESIGN.md` and
+`REFLECTION.md` for what went wrong with it and why. Reusing that old
+transcript here would describe behaviour the system no longer has.*

@@ -1,118 +1,180 @@
+"""The research workflow, wired together as a graph.
+
+    plan -> search -> review -> write brief
+                        │  └--> search again
+                        └-----> decline, if nothing found is relevant
+
+The loop back from the review step is the point of using a graph here: the
+number of search rounds depends on what the evidence turns out to look
+like, rather than being fixed in advance. LangGraph handles the wiring and
+carries state between steps; every decision the agent makes lives in
+`nodes.py`.
+"""
+
 from __future__ import annotations
 
 from typing import TypedDict
 
 from langgraph.graph import END, StateGraph
 
-from research_agent.agent.critic import assess_gaps
-from research_agent.agent.planner import decompose_question
-from research_agent.agent.report_generator import build_research_brief
-from research_agent.agent.router import route_sub_questions
-from research_agent.agent.synthesizer import synthesize
 from research_agent.config import Settings
-from research_agent.retrieval import Embedder, Reranker, build_context, citation_map
-from research_agent.retrieval import search as retrieval_search
-from research_agent.retrieval.types import RetrievedChunk
+from research_agent.retrieval import Embedder, Reranker, SearchResult, build_context, citation_map, search
 
-DEFAULT_MAX_ITERATIONS = 2
+from . import nodes
+
+MAX_ROUNDS = 2
+RESULTS_PER_SUB_QUESTION = 6
 
 
 class AgentState(TypedDict):
+    """What the workflow carries from one step to the next."""
+
     question: str
     sub_questions: list[str]
-    pending_sub_questions: list[str]  # sub-questions to retrieve for THIS round
-    retrieved: list[RetrievedChunk]
-    iteration: int
+    pending: list[str]  # What to search for in the current round.
+    results: list[SearchResult]
+    round_number: int
     gaps: list[str]
+    answerable: bool
     sufficient: bool
-    report: dict
+    brief: dict
 
 
-def build_graph(settings: Settings, max_iterations: int = DEFAULT_MAX_ITERATIONS):
-    """`settings` is closed over by the node functions rather than carried
-    in AgentState - state should stay plain, run-specific data (what LangGraph's
-    checkpointing/inspection is meant to work with), not a Settings object
-    it has no reason to know about.
+def build_graph(settings: Settings, max_rounds: int = MAX_ROUNDS):
+    """Assemble the workflow.
 
-    Embedder/Reranker are loaded exactly once here too, for the same
-    reason the MCP server loads them once at module level: retrieval.search()
-    defaults to constructing its own if none are passed, which is correct
-    for a single one-off call but would silently reload both models (and,
-    without HF_HUB_OFFLINE, re-verify their cache online) on every one of
-    the several retrieval calls a single agent run makes - found by timing
-    a real run and seeing multi-second gaps between LLM calls that had no
-    business being that slow.
+    The embedding and reranking models are loaded once here and reused by
+    every search in the run. Left to itself, `search` loads its own copy on
+    each call, which is fine for a one-off query but wasteful across the
+    several searches one run performs.
+
+    Args:
+        settings: Application configuration.
+        max_rounds: Hard ceiling on search rounds, so a question the agent
+            keeps finding gaps in still terminates.
+
+    Returns:
+        The compiled workflow, ready to invoke.
     """
     embedder = Embedder(settings.embedding_model)
-    reranker = Reranker()
+    reranker = Reranker(settings.reranker_model)
 
-    def plan_node(state: AgentState) -> dict:
-        sub_questions = decompose_question(state["question"], settings)
-        return {"sub_questions": sub_questions, "pending_sub_questions": sub_questions}
+    def plan_step(state: AgentState) -> dict:
+        """Break the question into sub-questions to search for."""
+        sub_questions = nodes.plan(state["question"], settings)
+        return {"sub_questions": sub_questions, "pending": sub_questions}
 
-    def retrieve_node(state: AgentState) -> dict:
-        # Pool + dedupe by chunk_id across sub-questions and iterations, so
-        # a chunk matched by two different sub-questions (or re-matched on
-        # a later iteration) contributes to synthesis once, not twice.
-        pooled = {c.chunk_id: c for c in state["retrieved"]}
-        pending = state["pending_sub_questions"]
-        routing = route_sub_questions(pending, settings)  # one LLM call for the whole round, not one per sub-question
-        for sub_q in pending:
-            results = retrieval_search(
-                sub_q, settings, categories=routing[sub_q], top_k=6, embedder=embedder, reranker=reranker
+    def search_step(state: AgentState) -> dict:
+        """Search for every pending sub-question and pool the results.
+
+        Results are keyed by chunk id, so a passage found by two different
+        sub-questions, or found again in a later round, is kept once.
+        """
+        pooled = {result.chunk_id: result for result in state["results"]}
+        routing = nodes.route(state["pending"], settings)
+
+        for sub_question in state["pending"]:
+            hits = search(
+                sub_question,
+                settings,
+                categories=routing[sub_question],
+                top_k=RESULTS_PER_SUB_QUESTION,
+                embedder=embedder,
+                reranker=reranker,
             )
-            for r in results:
-                pooled[r.chunk_id] = r
-        return {"retrieved": list(pooled.values()), "iteration": state["iteration"] + 1}
+            for hit in hits:
+                pooled[hit.chunk_id] = hit
 
-    def gap_check_node(state: AgentState) -> dict:
-        context = build_context(state["retrieved"])
-        assessment = assess_gaps(state["question"], state["sub_questions"], context, settings)
-        return {"gaps": assessment.gaps, "sufficient": assessment.sufficient, "pending_sub_questions": assessment.gaps}
+        return {"results": list(pooled.values()), "round_number": state["round_number"] + 1}
 
-    def should_continue(state: AgentState) -> str:
-        if state["sufficient"] or state["iteration"] >= max_iterations:
-            return "synthesize"
-        return "retrieve"
+    def review_step(state: AgentState) -> dict:
+        """Judge whether the evidence is relevant, and whether it is enough."""
+        assessment = nodes.assess_gaps(
+            state["question"], state["sub_questions"], build_context(state["results"]), settings
+        )
+        return {
+            "gaps": assessment.gaps,
+            "answerable": assessment.answerable,
+            "sufficient": assessment.sufficient,
+            "pending": assessment.gaps,
+        }
 
-    def synthesize_node(state: AgentState) -> dict:
-        chunks = state["retrieved"]
-        context = build_context(chunks)
-        cmap = citation_map(chunks)
-        synthesis = synthesize(state["question"], state["sub_questions"], context, settings)
-        report = build_research_brief(state["question"], synthesis, cmap)
-        # Merge the critic's last-round gaps into the synthesizer's own
-        # knowledge_gaps, deduped, rather than picking one source - both
-        # are genuine signals about what's missing.
-        report["knowledge_gaps"] = list(dict.fromkeys(report["knowledge_gaps"] + state.get("gaps", [])))
-        return {"report": report}
+    def next_step(state: AgentState) -> str:
+        """Choose what happens after reviewing the evidence.
+
+        Irrelevant evidence ends the run: if the knowledge base holds
+        nothing on the subject, searching again will not change that.
+        Otherwise the run either searches for what is missing or, once the
+        evidence is sufficient or the round limit is reached, writes up.
+        """
+        if not state["answerable"]:
+            return "decline"
+        if state["sufficient"] or state["round_number"] >= max_rounds:
+            return "write"
+        return "search"
+
+    def decline_step(state: AgentState) -> dict:
+        """Report that the question is outside what the knowledge base covers."""
+        brief = nodes.build_out_of_scope_brief(
+            state["question"], state["results"], state.get("gaps", [])
+        )
+        return {"brief": brief}
+
+    def write_step(state: AgentState) -> dict:
+        """Write the brief from everything gathered."""
+        results = state["results"]
+        synthesis = nodes.synthesise(
+            state["question"], state["sub_questions"], build_context(results), settings
+        )
+        brief = nodes.build_brief(state["question"], synthesis, citation_map(results))
+
+        # The critic and the synthesiser each report gaps, and they tend to
+        # notice different things, so both are kept, in order, without repeats.
+        brief["knowledge_gaps"] = list(dict.fromkeys(brief["knowledge_gaps"] + state.get("gaps", [])))
+        return {"brief": brief}
 
     graph = StateGraph(AgentState)
-    graph.add_node("plan", plan_node)
-    graph.add_node("retrieve", retrieve_node)
-    graph.add_node("gap_check", gap_check_node)
-    graph.add_node("synthesize", synthesize_node)
+    graph.add_node("plan", plan_step)
+    graph.add_node("search", search_step)
+    graph.add_node("review", review_step)
+    graph.add_node("decline", decline_step)
+    graph.add_node("write", write_step)
 
     graph.set_entry_point("plan")
-    graph.add_edge("plan", "retrieve")
-    graph.add_edge("retrieve", "gap_check")
-    graph.add_conditional_edges("gap_check", should_continue, {"retrieve": "retrieve", "synthesize": "synthesize"})
-    graph.add_edge("synthesize", END)
+    graph.add_edge("plan", "search")
+    graph.add_edge("search", "review")
+    graph.add_conditional_edges(
+        "review", next_step, {"search": "search", "write": "write", "decline": "decline"}
+    )
+    graph.add_edge("write", END)
+    graph.add_edge("decline", END)
 
     return graph.compile()
 
 
-def run_research_agent(question: str, settings: Settings, max_iterations: int = DEFAULT_MAX_ITERATIONS) -> dict:
-    graph = build_graph(settings, max_iterations=max_iterations)
-    initial_state: AgentState = {
+def answer_question(question: str, settings: Settings, max_rounds: int = MAX_ROUNDS) -> dict:
+    """Research a question and return an evidence-backed brief.
+
+    Args:
+        question: The research question to answer.
+        settings: Application configuration.
+        max_rounds: Maximum search rounds before writing the answer.
+
+    Returns:
+        A brief containing an executive summary, cited findings, any
+        conflicts between sources, a confidence rating, knowledge gaps, and
+        suggested follow-up questions.
+    """
+    graph = build_graph(settings, max_rounds=max_rounds)
+    initial: AgentState = {
         "question": question,
         "sub_questions": [],
-        "pending_sub_questions": [],
-        "retrieved": [],
-        "iteration": 0,
+        "pending": [],
+        "results": [],
+        "round_number": 0,
         "gaps": [],
+        "answerable": True,
         "sufficient": False,
-        "report": {},
+        "brief": {},
     }
-    final_state = graph.invoke(initial_state)
-    return final_state["report"]
+    return graph.invoke(initial)["brief"]

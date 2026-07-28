@@ -1,115 +1,154 @@
-# Engineering Research Agent
+# Research Assistant
 
-An AI research platform that ingests technical content from multiple public
-sources (arXiv, GitHub, RSS/engineering blogs, and government/standards
-publications) into a structured, versioned knowledge base, and answers
-research questions through an agentic retrieval workflow, producing
-evidence-backed briefs with citations, confidence assessment, and identified
-knowledge gaps.
+Answers technical research questions from a knowledge base built out of
+public sources, and returns a brief with cited evidence, a confidence
+rating, the gaps it could not fill, and suggested follow-up questions.
 
-Built for an AI Engineering Practical Assessment (domain: AI/ML systems).
-See [docs/DESIGN.md](docs/DESIGN.md) for the full design rationale and
-tradeoffs, [docs/EVALUATION.md](docs/EVALUATION.md) for the evaluation
-report, and [docs/EXAMPLE_BRIEF.md](docs/EXAMPLE_BRIEF.md) for a real
-end-to-end research brief.
+The knowledge base covers AI and machine learning systems, drawn from four
+independent sources across three categories:
 
-## Architecture
+| Category | Sources |
+|---|---|
+| Technical literature | arXiv papers (cs.CL, cs.AI, cs.LG) |
+| Practitioner knowledge | GitHub release notes and READMEs, engineering blog feeds |
+| Standards and regulations | NIST AI RMF, EU AI Act, US Executive Order 14110 |
+
+## How it works
 
 ```
-CLI (research-agent) ──┐
-                        ├──►  Service layer (plain Python)  ──►  LangGraph agent  ──►  Retriever  ──►  Chroma + SQLite
-MCP Server ─────────────┘                                          (plan/route/retrieve/critique/synthesize)
-                                                                                          │
-                                                          ┌───────────────┬───────────────┼───────────────┐
-                                                     arXiv API      GitHub API      RSS feeds      curated gov/standards docs
+   You                                    MCP client
+    │                                          │
+    ▼                                          ▼
+  main.py                              mcp_server.py
+    │                                          │
+    ▼                                          │
+  Agent:  plan → search → check gaps           │
+              ↑___________│  → write brief     │
+    │                                          │
+    ▼                                          ▼
+  Search:  vector recall → rerank → build context
+    │
+    ▼
+  SQLite (documents, version history, run logs)
+  Chroma (one vector collection per category)
+    ▲
+    │
+  Ingestion:  arXiv · GitHub · RSS · standards
 ```
 
-No HTTP API / FastAPI: the CLI and MCP server both call the same in-process
-service layer directly (see docs/DESIGN.md for why).
+A question is split into sub-questions, each routed to the categories
+likely to answer it. The agent then judges whether what it found is
+enough; if not, it searches again for what is missing, up to a limit.
+Only then does it write the brief, citing passages by number. Those
+numbers are resolved back to real sources in code rather than by the
+model, so a citation is either genuine or dropped.
 
 ## Setup
 
-Requires Python 3.12+.
+Requires Python 3.12 or newer.
 
 ```bash
-git clone <this-repo>
-cd Engineering_Research_Agent
 python3 -m venv .venv
 .venv/bin/pip install -e ".[dev]"
 
 cp .env.example .env
-# Fill in GROQ_API_KEY (free tier: console.groq.com) - required unless
-# LLM_PROVIDER=ollama. GITHUB_TOKEN is optional (raises the GitHub API
-# rate limit from 60/hr to 5000/hr). Once models are cached locally after
-# a first run, set HF_HUB_OFFLINE=true to skip ~40s of redundant
-# HuggingFace cache-verification requests on every startup.
 ```
 
-All commands log to `data/logs/research-agent.log` in addition to the
-console - watch progress live from any terminal with:
-
-```bash
-tail -f data/logs/research-agent.log
-```
+Then edit `.env`: set `GROQ_API_KEY` (free tier at console.groq.com), or
+set `LLM_PROVIDER=ollama` to run the language model locally instead.
+`GITHUB_TOKEN` is optional and raises the GitHub API rate limit.
 
 ## Usage
 
+Build the knowledge base first, then ask it questions.
+
 ```bash
-# Ingest a small sample from every source (drop --max-results for a full run)
-.venv/bin/research-agent ingest arxiv --max-results 50
-.venv/bin/research-agent ingest github
-.venv/bin/research-agent ingest rss_blog
-.venv/bin/research-agent ingest gov_standards
+# 1. Fetch documents. Start small; raise --max-results to fetch more.
+.venv/bin/python main.py ingest arxiv --max-results 500
+.venv/bin/python main.py ingest github
+.venv/bin/python main.py ingest rss_blog
+.venv/bin/python main.py ingest gov_standards
 
-# Historical backfill (arXiv only - pages deeper into history)
-.venv/bin/research-agent ingest arxiv --backfill --start-offset 5000 --max-results 1000
+# 2. Embed and index them for search.
+.venv/bin/python main.py index
 
-# Chunk + embed + index everything not yet indexed
-.venv/bin/research-agent index
+# 3. Ask questions.
+.venv/bin/python main.py
+```
 
-# Ask the research agent a question end-to-end
-.venv/bin/research-agent ask "What are the tradeoffs of speculative decoding for LLM inference?"
+```
+Question> What are the tradeoffs of speculative decoding for LLM inference?
+```
 
-# Run the evaluation suite
-.venv/bin/research-agent eval               # full: retrieval + agent (real LLM calls)
-.venv/bin/research-agent eval --skip-agent  # retrieval-only, no LLM calls/API cost
+Other commands:
 
-# Run the recurring scheduler (all sources, every 24h by default)
-.venv/bin/research-agent scheduler --interval-hours 24
+```bash
+.venv/bin/python main.py stats                  # what is stored, and how current it is
+.venv/bin/python main.py eval --skip-agent      # retrieval quality, no model calls
+.venv/bin/python main.py eval                   # full evaluation
+.venv/bin/python main.py schedule               # refresh all sources every 24h
+.venv/bin/pytest tests/ -q                      # tests
+
+# Reach further back in a source's history
+.venv/bin/python main.py ingest arxiv --backfill --start-offset 5000
 ```
 
 ## MCP server
 
-Exposes `search_knowledge_base`, `get_document`, `corpus_stats`, and
-`source_freshness` to any MCP-compatible client over stdio.
+The knowledge base is also exposed over the Model Context Protocol, so
+other tools can search it. It provides four tools:
+`search_knowledge_base`, `get_document`, `corpus_stats`, and
+`source_freshness`.
+
+Run it directly:
 
 ```bash
 .venv/bin/research-agent-mcp
 ```
 
-See [mcp_config.example.json](mcp_config.example.json) for how to connect
-a client (e.g. Claude Desktop) - fill in the absolute path to this
-project's `.venv/bin/python`.
+Or add it to an MCP client's configuration, replacing the paths with
+where this project lives on your machine:
 
-## Project layout
+```json
+{
+  "mcpServers": {
+    "research-agent": {
+      "command": "/path/to/Engineering_Research_Agent/.venv/bin/python",
+      "args": ["-m", "research_agent.mcp_server"],
+      "cwd": "/path/to/Engineering_Research_Agent"
+    }
+  }
+}
+```
+
+## Layout
 
 ```
+main.py                       Entry point: interactive session and commands
 research_agent/
-  models/        Document/Chunk schema (Pydantic) - the one shared shape every source maps into
-  storage/       SQLite schema + connection helper
-  ingestion/     One adapter per source (arxiv, github, rss, standards) + shared pipeline
-  scheduler/     APScheduler wiring - scheduled/manual/backfill are one code path
-  retrieval/     Chunking, embeddings, Chroma indexing, reranking, context construction
-  agent/         LangGraph agent: planner, router, critic, synthesizer, report_generator
-  mcp_server/    MCP tool server
-  evaluation/    Query set + metrics + eval runner
-  cli.py         Single CLI entrypoint for all of the above
-docs/            Design document, evaluation report, example brief
+  config.py                   Settings, read from .env
+  models.py                   Document and Chunk schema
+  storage.py                  SQLite schema, connections, queries
+  ingestion/
+    pipeline.py               Hashing, change detection, versioning, run logs
+    arxiv.py github.py rss.py standards.py
+  retrieval/
+    indexer.py                Chunking, embedding, indexing
+    search.py                 Vector search, reranking, context building
+  agent/
+    prompts.py                Prompts for each reasoning step
+    nodes.py                  Plan, route, assess gaps, synthesise, build brief
+    graph.py                  How those steps connect, including the loop
+  evaluation.py               Query set, metrics, evaluation runner
+  scheduler.py                Recurring ingestion
+  mcp_server.py               MCP tools
+tests/
+docs/                         Design notes, evaluation results, example output
 ```
 
-## Status
+## Documentation
 
-All 5 parts (ingestion, retrieval, MCP server, agent, evaluation) are
-implemented and verified end-to-end against real data and a live LLM
-backend - see docs/EVALUATION.md for what was actually measured, including
-what didn't work well.
+- [docs/DESIGN.md](docs/DESIGN.md) — decisions, tradeoffs, and limitations
+- [docs/EVALUATION.md](docs/EVALUATION.md) — what was measured and what it showed
+- [docs/EXAMPLE_BRIEF.md](docs/EXAMPLE_BRIEF.md) — a real answer, end to end
+- [docs/REFLECTION.md](docs/REFLECTION.md) — what worked, what would change
