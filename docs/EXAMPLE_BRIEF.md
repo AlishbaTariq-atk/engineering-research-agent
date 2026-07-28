@@ -82,7 +82,7 @@ is why both appear here.
 ## A question the knowledge base cannot answer
 
 Asking something clearly outside the domain - "What is the capital of
-France?" - stops after the review step rather than assembling an answer
+Pakistan?" - stops after the review step rather than assembling an answer
 from whatever search came closest. The model is shown the retrieved
 passages next to the question and judges that none of them, an AI
 regulation and a couple of unrelated technical papers among them, actually

@@ -23,11 +23,7 @@ mcp_server ┘
 ```
 
 There is no HTTP API. Both entry points call the same code in the same
-process, which gives the separation an API would provide without a network
-hop, a second process to keep running, or request schemas duplicating the
-Pydantic models that already exist. If browser access were needed later,
-an HTTP layer would sit alongside `main.py` without touching anything
-beneath it.
+process, which gives the separation an API would provide without a network hop, a second process to keep running, or request schemas duplicating the Pydantic models that already exist. If browser access were needed later, an HTTP layer would sit alongside `main.py` without touching anything beneath it.
 
 ## Data
 
