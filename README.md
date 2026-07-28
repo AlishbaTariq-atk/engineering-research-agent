@@ -15,33 +15,45 @@ independent sources across three categories:
 
 ## How it works
 
-```
-   You                                    MCP client
-    │                                          │
-    ▼                                          ▼
-  main.py                              mcp_server.py
-    │                                          │
-    ▼                                          │
-  Agent:  plan → search → check gaps           │
-              ↑___________│  → write brief     │
-    │                                          │
-    ▼                                          ▼
-  Search:  vector recall → rerank → build context
-    │
-    ▼
-  SQLite (documents, version history, run logs)
-  Chroma (one vector collection per category)
-    ▲
-    │
-  Ingestion:  arXiv · GitHub · RSS · standards
+```mermaid
+flowchart LR
+    You(["You"]) --> CLI["main.py"]
+    Client(["MCP client"]) --> MCPServer["mcp_server.py"]
+
+    CLI --> Agent["Agent\nplan → search → review → write / decline"]
+    MCPServer --> Search["search()\nvector recall → rerank → context"]
+    Agent --> Search
+
+    Search --> SQLite[("SQLite\ndocuments, versions, run logs")]
+    Search --> Chroma[("Chroma\none collection per category")]
+
+    Ingestion["Ingestion\narXiv · GitHub · RSS · standards"] --> SQLite
+    SQLite --> Indexer["Indexer\nchunk → embed"] --> Chroma
 ```
 
 A question is split into sub-questions, each routed to the categories
 likely to answer it. The agent then judges whether what it found is
-enough; if not, it searches again for what is missing, up to a limit.
-Only then does it write the brief, citing passages by number. Those
+relevant and enough; if not enough, it searches again for what is
+missing, up to a limit. Only once the evidence is judged both relevant
+and sufficient does it write the brief, citing passages by number. Those
 numbers are resolved back to real sources in code rather than by the
 model, so a citation is either genuine or dropped.
+
+The agent itself is a small state machine (see `agent/graph.py`), not a
+straight line — how many search rounds a question takes depends on what
+the evidence turns out to look like:
+
+```mermaid
+flowchart TD
+    Start(["Question"]) --> Plan["plan\nbreak into sub-questions"]
+    Plan --> Search2["search\nroute + retrieve"]
+    Search2 --> Review["review\nanswerable? sufficient?"]
+    Review -->|not answerable| Decline["decline\nexplain why, no answer given"]
+    Review -->|answerable, thin,\nrounds remain| Search2
+    Review -->|sufficient, or\nround limit reached| Write["write\nsynthesize the brief"]
+    Decline --> End(["Brief"])
+    Write --> End
+```
 
 ## Setup
 

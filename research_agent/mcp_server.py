@@ -1,8 +1,8 @@
 """MCP server exposing the knowledge base to other tools.
 
 Any MCP-compatible client can connect over stdio and search the corpus,
-fetch documents, and inspect how current the data is. See
-`mcp_config.example.json` for client configuration.
+fetch documents, and inspect how current the data is. See the "MCP
+server" section of the README for client configuration.
 """
 
 from __future__ import annotations
