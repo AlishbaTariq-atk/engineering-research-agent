@@ -15,20 +15,67 @@ independent sources across three categories:
 
 ## How it works
 
+The system is a layered architecture: a presentation layer (two
+interchangeable entry points), an application layer (the agent and the
+search service it calls), an ingestion layer that feeds the data layer,
+and a data access layer split between a relational store and a vector
+store.
+
 ```mermaid
-flowchart LR
-    You(["You"]) --> CLI["main.py"]
-    Client(["MCP client"]) --> MCPServer["mcp_server.py"]
+flowchart TB
+    classDef actor fill:#ffffff,stroke:#000000,stroke-width:1px,color:#000000
+    classDef process fill:#ffffff,stroke:#000000,stroke-width:1px,color:#000000
+    classDef store fill:#ffffff,stroke:#000000,stroke-width:2px,color:#000000
+    classDef external fill:#ffffff,stroke:#000000,stroke-width:1px,stroke-dasharray:4 3,color:#000000
 
-    CLI --> Agent["Agent\nplan → search → review → write / decline"]
-    MCPServer --> Search["search()\nvector recall → rerank → context"]
-    Agent --> Search
+    User(["User"]):::actor
+    MCPClient(["MCP client"]):::actor
+    Sources["External sources\narXiv API · GitHub API · RSS feeds · standards bodies"]:::external
 
-    Search --> SQLite[("SQLite\ndocuments, versions, run logs")]
-    Search --> Chroma[("Chroma\none collection per category")]
+    subgraph Presentation["Presentation layer"]
+        direction LR
+        CLI["main.py\nCLI entry point"]:::process
+        MCPServer["mcp_server.py\nMCP protocol adapter"]:::process
+    end
 
-    Ingestion["Ingestion\narXiv · GitHub · RSS · standards"] --> SQLite
-    SQLite --> Indexer["Indexer\nchunk → embed"] --> Chroma
+    subgraph Application["Application layer"]
+        direction LR
+        Agent["Agent\nLangGraph state machine"]:::process
+        SearchSvc["Search service\nvector recall + rerank"]:::process
+    end
+
+    subgraph Ingestion["Ingestion layer"]
+        direction LR
+        Adapters["Source adapters"]:::process
+        Indexer["Indexer\nchunk + embed"]:::process
+    end
+
+    subgraph DataAccess["Data access layer"]
+        direction LR
+        SQLite[("SQLite\nmetadata, versions, run logs")]:::store
+        Chroma[("Chroma\nvectors, one collection per category")]:::store
+    end
+
+    User --> CLI
+    MCPClient --> MCPServer
+    CLI --> Agent
+    MCPServer --> SearchSvc
+    Agent --> SearchSvc
+    SearchSvc --> SQLite
+    SearchSvc --> Chroma
+
+    Sources --> Adapters
+    Adapters --> SQLite
+    SQLite --> Indexer
+    Indexer --> Chroma
+
+    subgraph Legend["Legend"]
+        direction LR
+        Lg1(["Actor"]):::actor
+        Lg2["Component"]:::process
+        Lg3[("Data store")]:::store
+        Lg4["External system"]:::external
+    end
 ```
 
 A question is split into sub-questions, each routed to the categories
@@ -39,20 +86,20 @@ and sufficient does it write the brief, citing passages by number. Those
 numbers are resolved back to real sources in code rather than by the
 model, so a citation is either genuine or dropped.
 
-The agent itself is a small state machine (see `agent/graph.py`), not a
+The agent itself is a finite state machine (see `agent/graph.py`), not a
 straight line — how many search rounds a question takes depends on what
 the evidence turns out to look like:
 
 ```mermaid
-flowchart TD
-    Start(["Question"]) --> Plan["plan\nbreak into sub-questions"]
-    Plan --> Search2["search\nroute + retrieve"]
-    Search2 --> Review["review\nanswerable? sufficient?"]
-    Review -->|not answerable| Decline["decline\nexplain why, no answer given"]
-    Review -->|answerable, thin,\nrounds remain| Search2
-    Review -->|sufficient, or\nround limit reached| Write["write\nsynthesize the brief"]
-    Decline --> End(["Brief"])
-    Write --> End
+stateDiagram-v2
+    [*] --> Plan
+    Plan --> Search: sub-questions
+    Search --> Review: pooled results
+    Review --> Search: answerable, insufficient, rounds remain
+    Review --> Write: sufficient, or round limit reached
+    Review --> Decline: not answerable
+    Write --> [*]: brief
+    Decline --> [*]: brief (out_of_scope)
 ```
 
 ## Setup
