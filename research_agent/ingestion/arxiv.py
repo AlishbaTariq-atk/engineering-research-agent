@@ -1,13 +1,17 @@
 """arXiv adapter: academic papers, fetched through the public arXiv API."""
-
+# for clean modern type hints
 from __future__ import annotations
-
+# for pulling paper ID and version from URL pattern, and collapsing whitespace/line breaks
 import re
+#for pausing between requests to avoid rate-limiting
 import time
+# used for fetch() generator (returntype -> type hint -> Iterator)
 from collections.abc import Iterator
+# for arXiv's timestamps
 from datetime import UTC, date, datetime
-
+# XML/Atom feed parsing
 import feedparser
+# for HTTP requests to arXiv API and downloading PDFs
 import httpx
 
 from research_agent.config import Settings
@@ -65,7 +69,7 @@ def _get_page(client: httpx.Client, params: dict) -> httpx.Response:
     """Request one page of results, retrying if arXiv rate-limits us.
 
     Paging through thousands of results can trip the rate limiter even at
-    the documented request spacing, so a 429 is retried with a doubling
+    the documented request spacing, so a 429 (Too Many Requests) is retried with a doubling
     delay instead of ending the run.
 
     Args:

@@ -1,8 +1,9 @@
 """GitHub adapter: release notes and READMEs from tracked repositories."""
 
 from __future__ import annotations
-
+# for decoding ReadMe content into readable text.
 import base64
+# for errors and warnings logging
 import logging
 from collections.abc import Iterator
 from datetime import UTC, date, datetime

@@ -14,7 +14,9 @@ import sqlite3
 from datetime import UTC, date, datetime
 
 import chromadb
+# for doing chunk splitting of the documents
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+# to load and run the embedding model
 from sentence_transformers import SentenceTransformer
 
 from research_agent.config import Settings

@@ -16,14 +16,65 @@ not have been measured.
 
 ## Architecture
 
-```
-main.py  ─┐
-          ├─►  agent  ─►  search  ─►  SQLite + Chroma  ◄─  ingestion
-mcp_server ┘
+A layered view: two interchangeable entry points over one application
+layer, an ingestion layer that feeds a data access layer split between a
+relational store and a vector store.
+
+```mermaid
+flowchart TB
+    classDef actor fill:#ffffff,stroke:#000000,stroke-width:1px,color:#000000
+    classDef process fill:#ffffff,stroke:#000000,stroke-width:1px,color:#000000
+    classDef store fill:#ffffff,stroke:#000000,stroke-width:2px,color:#000000
+    classDef external fill:#ffffff,stroke:#000000,stroke-width:1px,stroke-dasharray:4 3,color:#000000
+
+    User(["User"]):::actor
+    MCPClient(["MCP client"]):::actor
+    Sources["External sources\narXiv API · GitHub API · RSS feeds · standards bodies"]:::external
+
+    subgraph Presentation["Presentation layer"]
+        direction LR
+        CLI["main.py\nCLI entry point"]:::process
+        MCPServer["mcp_server.py\nMCP protocol adapter"]:::process
+    end
+
+    subgraph Application["Application layer"]
+        direction LR
+        Agent["Agent\nLangGraph state machine"]:::process
+        SearchSvc["Search service\nvector recall + rerank"]:::process
+    end
+
+    subgraph Ingestion["Ingestion layer"]
+        direction LR
+        Adapters["Source adapters"]:::process
+        Indexer["Indexer\nchunk + embed"]:::process
+    end
+
+    subgraph DataAccess["Data access layer"]
+        direction LR
+        SQLite[("SQLite\nmetadata, versions, run logs")]:::store
+        Chroma[("Chroma\nvectors, one collection per category")]:::store
+    end
+
+    User --> CLI
+    MCPClient --> MCPServer
+    CLI --> Agent
+    MCPServer --> SearchSvc
+    Agent --> SearchSvc
+    SearchSvc --> SQLite
+    SearchSvc --> Chroma
+
+    Sources --> Adapters
+    Adapters --> SQLite
+    SQLite --> Indexer
+    Indexer --> Chroma
 ```
 
 There is no HTTP API. Both entry points call the same code in the same
-process, which gives the separation an API would provide without a network hop, a second process to keep running, or request schemas duplicating the Pydantic models that already exist. If browser access were needed later, an HTTP layer would sit alongside `main.py` without touching anything beneath it.
+process, which gives the separation an API would provide without a
+network hop, a second process to keep running, or request schemas
+duplicating the Pydantic models that already exist. If browser access
+were needed later, an HTTP layer would sit alongside `main.py` without
+touching anything beneath it.
 
 ## Data
 
@@ -61,6 +112,62 @@ document is committed on its own, so a network failure partway through a
 long run keeps everything already stored. Items that fail to fetch are
 returned as `FetchFailure` values and recorded in a table, so they appear
 in the run's statistics rather than only in a log.
+
+The relational schema this pipeline writes to:
+
+```mermaid
+erDiagram
+    DOCUMENTS ||--o{ DOCUMENT_VERSIONS : "has history"
+    INGESTION_RUNS ||--o{ INGESTION_FAILURES : "logs failures of"
+
+    DOCUMENTS {
+        string doc_id PK
+        string source
+        string source_id
+        string category
+        string title
+        string content_hash
+        int version
+        string storage_mode
+        string status
+        string superseded_by FK
+        int last_indexed_version "null until indexed"
+    }
+
+    DOCUMENT_VERSIONS {
+        int id PK
+        string doc_id FK
+        int version
+        string content_hash
+        string captured_at
+        string change_summary
+    }
+
+    INGESTION_RUNS {
+        string run_id PK
+        string source
+        string trigger "scheduled | manual | backfill"
+        string status "running | success | failed"
+        int documents_new
+        int documents_updated
+        int documents_failed
+    }
+
+    INGESTION_FAILURES {
+        int id PK
+        string run_id FK
+        string source_id
+        string url
+        string error_message
+    }
+```
+
+`document_versions` is append-only history, never updated or deleted —
+one row per content change. `last_indexed_version` on `documents` is what
+makes indexing incremental: a document is only re-embedded when it
+differs from `version`. `superseded_by` is a real column with no code
+path that sets it yet — the schema anticipates document supersession,
+nothing currently detects or acts on it.
 
 ## Retrieval
 
@@ -105,6 +212,46 @@ depends on what the searches turn up. LangGraph wires the steps and
 carries state; every decision — what to search for, which categories,
 whether to continue, what to claim — is made by prompts and typed models
 in `agent/nodes.py`, not by a prebuilt agent abstraction.
+
+One question's actual message flow through the components involved:
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant CLI as main.py
+    participant Agent as Agent (LangGraph)
+    participant Search as Search service
+    participant Chroma
+    participant SQLite
+
+    User->>CLI: question
+    CLI->>Agent: answer_question(question)
+    Agent->>Agent: plan: sub-questions
+    Agent->>Agent: route: sub-question -> categories
+
+    loop up to 2 rounds
+        Agent->>Search: search(sub-question, categories)
+        Search->>Chroma: vector query per category
+        Chroma-->>Search: candidate passages
+        Search->>Search: cross-encoder rerank
+        Search-->>Agent: ranked passages
+        Agent->>Agent: review: answerable? sufficient?
+    end
+
+    alt not answerable
+        Agent->>Agent: build out-of-scope brief
+    else sufficient, or round limit reached
+        Agent->>Agent: synthesise + resolve citations
+    end
+
+    Agent-->>CLI: brief
+    CLI-->>User: printed brief
+```
+
+The `loop`/`alt` blocks map directly onto `next_step`'s branching in
+`agent/graph.py`: not answerable ends the run immediately; answerable but
+thin starts another `search` round; sufficient (or the round cap hit)
+moves to writing.
 
 **Citations cannot be fabricated.** The model cites passages by number.
 Those numbers are resolved to titles and URLs by ordinary Python, looking

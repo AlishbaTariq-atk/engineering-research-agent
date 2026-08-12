@@ -28,8 +28,8 @@ from research_agent.models import SourceName
 from research_agent.storage import connect, init_db
 
 BANNER = """
-Research Assistant
-Ask a technical question and get an evidence-backed brief.
+AI Research Assistant
+Ask a technical question in domain of AI and get an evidence-backed brief.
 Type 'exit' or press Ctrl-C to quit.
 """
 
@@ -157,13 +157,13 @@ def cmd_chat(settings: Settings) -> None:
         try:
             question = input("Question> ").strip()
         except (EOFError, KeyboardInterrupt):
-            print("\nGoodbye.")
+            print("\nSee you soon! Bubyee.")
             return
 
         if not question:
             continue
         if question.lower() in {"exit", "quit"}:
-            print("Goodbye.")
+            print("See you soon! Bubyee.")
             return
 
         started = time.perf_counter()
